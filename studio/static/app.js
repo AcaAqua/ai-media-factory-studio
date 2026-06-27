@@ -684,6 +684,87 @@ function assetKindLabel(kind) {
   }[kind] || kind;
 }
 
+function normalizeAssetName(value) {
+  return String(value || "")
+    .split(/[\\/]/)
+    .pop()
+    .toLowerCase()
+    .replace(/\.(safetensors|ckpt|pth|pt|bin|onnx|json)$/i, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function assetKindFromCivitaiType(value) {
+  const type = String(value || "").toLowerCase();
+  if (type.includes("lora")) return "lora";
+  if (type.includes("vae")) return "vae";
+  if (type.includes("controlnet")) return "controlnet";
+  if (type.includes("upscaler")) return "upscaler";
+  return "checkpoint";
+}
+
+function civitaiHashSet(files) {
+  const hashes = new Set();
+  (files || []).forEach((file) => {
+    Object.values(file.hashes || {}).forEach((value) => {
+      if (value) hashes.add(String(value).toLowerCase());
+    });
+  });
+  return hashes;
+}
+
+function scoreCivitaiAssetCandidate(asset, item, kindHint) {
+  if (!asset || asset.missing) return null;
+  const model = item.model || {};
+  const version = item.version || {};
+  const files = version.files || [];
+  const hashes = civitaiHashSet(files);
+  let score = 0;
+  const reasons = [];
+  if (asset.asset_kind === kindHint) {
+    score += 30;
+    reasons.push("type");
+  }
+  if (asset.sha256 && hashes.has(String(asset.sha256).toLowerCase())) {
+    score += 120;
+    reasons.push("hash");
+  }
+  if (asset.source_url && item.source_url && asset.source_url === item.source_url) {
+    score += 90;
+    reasons.push("source");
+  }
+  const assetNames = [asset.file_name, asset.name, asset.relative_path].map(normalizeAssetName).filter(Boolean);
+  const civitaiNames = [
+    model.name,
+    version.name,
+    ...files.map((file) => file.name),
+  ].map(normalizeAssetName).filter(Boolean);
+  if (assetNames.some((assetName) => civitaiNames.some((name) => name && assetName === name))) {
+    score += 60;
+    reasons.push("filename");
+  } else if (assetNames.some((assetName) => civitaiNames.some((name) => name && (assetName.includes(name) || name.includes(assetName))))) {
+    score += 25;
+    reasons.push("name");
+  }
+  if (!score && asset.asset_kind !== kindHint) return null;
+  return { asset, score, reasons };
+}
+
+function civitaiAssetCandidates(item) {
+  const kindHint = assetKindFromCivitaiType(item.model?.type);
+  const scored = (assetRegistry.items || [])
+    .map((asset) => scoreCivitaiAssetCandidate(asset, item, kindHint))
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score || String(a.asset.name).localeCompare(String(b.asset.name)));
+  return {
+    kindHint,
+    candidates: scored.length
+      ? scored
+      : (assetRegistry.items || [])
+        .filter((asset) => !asset.missing && asset.asset_kind === kindHint)
+        .map((asset) => ({ asset, score: 0, reasons: ["type"] })),
+  };
+}
+
 function renderAssetRegistry() {
   const summary = $("#assetRegistrySummary");
   const list = $("#assetRegistryList");
@@ -926,10 +1007,17 @@ async function lookupCivitai(event) {
   const model = item.model || {};
   const version = item.version || {};
   const files = version.files || [];
-  const targetOptions = (assetRegistry.items || [])
-    .filter((asset) => !asset.missing)
-    .map((asset) => `<option value="${escapeHtml(asset.item_id)}">${escapeHtml(`${assetKindLabel(asset.asset_kind)} / ${asset.name}`)}</option>`)
+  const { kindHint, candidates } = civitaiAssetCandidates(item);
+  const targetAssets = candidates.length
+    ? candidates
+    : (assetRegistry.items || []).filter((asset) => !asset.missing).map((asset) => ({ asset, score: 0, reasons: [] }));
+  const targetOptions = targetAssets
+    .map(({ asset, score, reasons }) => {
+      const suffix = score ? ` / 候補 ${score} (${reasons.join(", ")})` : "";
+      return `<option value="${escapeHtml(asset.item_id)}">${escapeHtml(`${assetKindLabel(asset.asset_kind)} / ${asset.name}${suffix}`)}</option>`;
+    })
     .join("");
+  const bestCandidate = targetAssets[0];
   preview.innerHTML = `
     <article class="civitai-card">
       <header>
@@ -956,12 +1044,16 @@ async function lookupCivitai(event) {
         </div>
       </details>
       <div class="civitai-apply">
+        <div class="chip-list">
+          <span class="chip">${escapeHtml(assetKindLabel(kindHint))}候補</span>
+          <span class="chip ${bestCandidate ? "ok" : "warn"}">${bestCandidate ? `候補 ${targetAssets.length}件` : "反映先候補なし"}</span>
+        </div>
         <label class="field">
           <span>反映先資産</span>
-          <select id="civitaiAssetTarget">${targetOptions}</select>
+          <select id="civitaiAssetTarget">${targetOptions || `<option value="">資産台帳に反映先がありません</option>`}</select>
         </label>
         <button class="secondary" type="button" id="applyCivitaiToAsset">選択資産へ反映</button>
-        <p class="note">出典URL、作者、base model、trigger words等を資産台帳へ反映します。ファイルは移動・ダウンロードしません。</p>
+        <p class="note">反映先候補は種別、hash、ファイル名、既存source URLから推定します。出典URL、作者、base model、trigger words等を資産台帳へ反映します。ファイルは移動・ダウンロードしません。</p>
       </div>
     </article>
   `;

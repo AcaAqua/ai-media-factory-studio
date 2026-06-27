@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.9-dev - Unreleased
+## v0.1.9 - 2026-06-27
 
 - Added initial Studio asset registry tables for model, LoRA, VAE, ControlNet, upscaler, and workflow locations.
 - Added non-destructive asset scanning that records file metadata without moving or deleting source files.
@@ -8,6 +8,8 @@
 - Added asset registry metadata editing for source URL, license, creator, base model, status, and notes.
 - Added Civitai metadata apply action for asset registry items.
 - Added Workflow required asset scan and missing/matched diagnostics.
+- Improved Civitai asset candidate matching by type, hash, filename, and existing source URL.
+- Expanded Workflow asset detection for common VAE, ControlNet, LoRA, Upscaler, UNet, and diffusion model loader variants.
 
 ## v0.1.8 - 2026-06-27
 

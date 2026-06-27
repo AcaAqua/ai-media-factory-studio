@@ -22,7 +22,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
-APP_VERSION = "0.1.9-dev"
+APP_VERSION = "0.1.9"
 ROOT = Path(__file__).resolve().parents[1]
 STUDIO = ROOT / "studio"
 STATIC = STUDIO / "static"
@@ -823,16 +823,18 @@ def apply_civitai_to_asset_registry(payload: dict[str, Any]) -> dict[str, Any]:
 def workflow_requirement_kind(class_type: str, input_key: str) -> str | None:
     class_lower = class_type.lower()
     key = input_key.lower()
-    if "checkpointloadersimple" in class_lower and key == "ckpt_name":
-        return "checkpoint"
-    if "loraloader" in class_lower and key == "lora_name":
-        return "lora"
-    if "vaeloader" in class_lower and key in {"vae_name", "ckpt_name"}:
-        return "vae"
-    if "controlnetloader" in class_lower and key in {"control_net_name", "controlnet_name"}:
-        return "controlnet"
-    if "upscalemodelloader" in class_lower and key == "model_name":
+    if "upscale" in class_lower and key in {"model_name", "upscale_model", "upscaler_name"}:
         return "upscaler"
+    if "controlnet" in class_lower and key in {"control_net_name", "controlnet_name", "model_name"}:
+        return "controlnet"
+    if "vae" in class_lower and key in {"vae_name", "ckpt_name", "model_name"}:
+        return "vae"
+    if "lora" in class_lower and (key == "lora_name" or "lora" in key):
+        return "lora"
+    if "checkpoint" in class_lower and key in {"ckpt_name", "checkpoint", "model_name"}:
+        return "checkpoint"
+    if class_lower in {"unetloader", "diffusionmodelloader"} and key in {"unet_name", "model_name"}:
+        return "checkpoint"
     return None
 
 
