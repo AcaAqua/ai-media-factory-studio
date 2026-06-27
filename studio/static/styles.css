@@ -270,7 +270,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   gap: 8px;
   margin-top: 10px;
 }
-.comparison-card, .storage-card {
+.comparison-card, .storage-card, .diagnostic-card {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #101416;
@@ -278,7 +278,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   display: grid;
   gap: 8px;
 }
-.comparison-card header, .storage-card header {
+.comparison-card header, .storage-card header, .diagnostic-card header {
   display: flex;
   justify-content: space-between;
   gap: 8px;
@@ -287,6 +287,39 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .storage-list {
   display: grid;
   gap: 10px;
+}
+.diagnostics-panel {
+  display: grid;
+  gap: 10px;
+}
+.diagnostic-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+.diagnostic-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.diagnostic-card.ok { border-color: rgba(99, 230, 190, .35); }
+.diagnostic-card.warn { border-color: rgba(255, 205, 97, .45); }
+.diagnostic-card.bad { border-color: rgba(255, 107, 107, .5); }
+.diagnostic-notes {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #14191b;
+  padding: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.diagnostic-notes p {
+  margin: 0 0 8px;
+}
+.diagnostic-notes ul {
+  margin: 6px 0 0 18px;
+  padding: 0;
 }
 .board-filters {
   margin-bottom: 12px;

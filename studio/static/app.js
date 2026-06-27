@@ -58,6 +58,7 @@ function render() {
   renderRecipes();
   renderModels();
   renderSettings();
+  renderDiagnostics();
   renderStorage();
   renderMappingTable();
   updateScopeWarning();
@@ -668,6 +669,73 @@ function renderSettings() {
   `;
 }
 
+function renderDiagnostics() {
+  const panel = $("#diagnosticsPanel");
+  if (!panel) return;
+  const diag = state.diagnostics;
+  if (!diag) {
+    panel.innerHTML = `<div class="empty-state">診断情報を取得できませんでした。</div>`;
+    return;
+  }
+  const statusCounts = Object.fromEntries((diag.job_statuses || []).map((item) => [item.status, item.count]));
+  const requiredIssues = [
+    ...(diag.missing_mappings || []).map((item) => `${item.name}: ${item.missing.map((field) => FIELD_LABELS[field] || field).join(", ")}`),
+    ...(diag.storage_issues || []).map((item) => `${item.name}: ${item.validation || "storage issue"}`),
+    ...(diag.prompt_id_missing || []).map((item) => `${item.job_id}: prompt_idなし`),
+  ];
+  panel.innerHTML = `
+    <div class="diagnostic-grid">
+      ${diagnosticCard("接続", [
+        `ComfyUI ${diag.connections.comfyui.ok ? "OK" : "NG"}`,
+        `Ollama ${diag.connections.ollama.ok ? "OK" : "NG"}`,
+        `Git ${diag.git.ok ? "OK" : "NG"}`,
+      ], diag.connections.comfyui.ok && diag.connections.ollama.ok && diag.git.ok ? "ok" : "warn")}
+      ${diagnosticCard("DB", [
+        `${diag.counts.jobs} jobs`,
+        `${diag.counts.assets} assets`,
+        `${diag.counts.outputs} outputs`,
+        `${formatBytes(diag.database.size_bytes)}`,
+      ], diag.database.exists ? "ok" : "bad")}
+      ${diagnosticCard("ジョブ", [
+        `submitted ${statusCounts.submitted || 0}`,
+        `running ${statusCounts.running || 0}`,
+        `failed ${statusCounts.failed || 0}`,
+        `再同期候補 ${(diag.resync_candidates || []).length}`,
+      ], (diag.active_jobs || []).length ? "warn" : "ok")}
+      ${diagnosticCard("保存先", [
+        `Adult Local ${diag.adult_storage_ok ? "OK" : "要確認"}`,
+        `要確認 ${(diag.storage_issues || []).length}`,
+      ], diag.adult_storage_ok && !(diag.storage_issues || []).length ? "ok" : "warn")}
+    </div>
+    <div class="diagnostic-notes">
+      <p>${escapeHtml(`最終診断 ${diag.generated_at || "-"}`)}</p>
+      ${(diag.warnings || []).length
+        ? `<ul>${diag.warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+        : `<p class="good-text">主要状態に警告はありません。</p>`}
+      ${requiredIssues.length
+        ? `<details><summary>確認が必要な項目 ${requiredIssues.length}件</summary><ul>${requiredIssues.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></details>`
+        : ""}
+    </div>
+  `;
+}
+
+function diagnosticCard(title, lines, level = "") {
+  return `
+    <article class="diagnostic-card ${escapeHtml(level)}">
+      <header><strong>${escapeHtml(title)}</strong><span class="chip ${escapeHtml(level)}">${escapeHtml(level || "info")}</span></header>
+      ${lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}
+    </article>
+  `;
+}
+
+async function resyncJobs() {
+  const result = await api("/api/jobs/resync", { method: "POST", body: JSON.stringify({ include_completed: false, limit: 50 }) });
+  await load();
+  const completed = (result.results || []).filter((item) => item.status === "completed").length;
+  const failed = (result.results || []).filter((item) => item.ok === false || item.status === "failed").length;
+  alert(`再同期: 対象 ${result.requested}件 / completed ${completed}件 / failed ${failed}件`);
+}
+
 function renderStorage() {
   const list = $("#storageList");
   if (!list) return;
@@ -1238,6 +1306,7 @@ $$("[data-quick-filter]").forEach((button) => button.addEventListener("click", (
 $("#openCompare").addEventListener("click", openCompareView);
 $("#closeCompare").addEventListener("click", closeCompareView);
 $("#saveCompare").addEventListener("click", () => saveComparisonSet().catch((error) => alert(error.message)));
+$("#resyncJobs").addEventListener("click", () => resyncJobs().catch((error) => alert(error.message)));
 $("#openStorageDialog").addEventListener("click", () => openStorageDialog("general"));
 $("#detectMapping").addEventListener("click", () => detectMapping().catch((error) => alert(error.message)));
 $("#saveMapping").addEventListener("click", () => saveMapping().catch((error) => alert(error.message)));

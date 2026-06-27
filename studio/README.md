@@ -1,4 +1,4 @@
-# AI Media Factory Studio v0.1.6
+# AI Media Factory Studio v0.1.7
 
 Local-first control surface for ComfyUI, Ollama, workflow registration, generation history, and media management.
 

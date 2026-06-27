@@ -21,7 +21,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
-APP_VERSION = "0.1.6"
+APP_VERSION = "0.1.7"
 ROOT = Path(__file__).resolve().parents[1]
 STUDIO = ROOT / "studio"
 STATIC = STUDIO / "static"
@@ -945,6 +945,145 @@ def git_state() -> dict[str, Any]:
         return {"ok": False, "output": str(exc)}
 
 
+def diagnostics_summary(
+    con: sqlite3.Connection,
+    connections: dict[str, Any] | None = None,
+    git: dict[str, Any] | None = None,
+    storage: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    connections = connections or connection_state(con)
+    git = git or git_state()
+    output_root = configured_comfy_output_root(con)
+    storage = storage or [
+        storage_status(item, output_root)
+        for item in rows(con, "SELECT * FROM storage_locations ORDER BY content_scope, is_default DESC, name")
+    ]
+    job_statuses = rows(con, "SELECT status, COUNT(*) AS count FROM generation_jobs GROUP BY status ORDER BY status")
+    counts = {
+        "jobs": row(con, "SELECT COUNT(*) AS count FROM generation_jobs")["count"],
+        "assets": row(con, "SELECT COUNT(*) AS count FROM media_assets")["count"],
+        "outputs": row(con, "SELECT COUNT(*) AS count FROM generation_job_outputs")["count"],
+        "workflows": row(con, "SELECT COUNT(*) AS count FROM workflows")["count"],
+        "recipes": row(con, "SELECT COUNT(*) AS count FROM recipes")["count"],
+    }
+    active_jobs = rows(
+        con,
+        """
+        SELECT job_id, status, comfy_prompt_id, created_at, updated_at, error_message
+        FROM generation_jobs
+        WHERE status IN ('submitted', 'running')
+        ORDER BY created_at DESC
+        LIMIT 20
+        """,
+    )
+    resync_candidates = rows(
+        con,
+        """
+        SELECT job_id, status, comfy_prompt_id, updated_at
+        FROM generation_jobs
+        WHERE comfy_prompt_id IS NOT NULL AND status IN ('submitted', 'running', 'failed')
+        ORDER BY updated_at DESC
+        LIMIT 50
+        """,
+    )
+    prompt_id_missing = rows(
+        con,
+        """
+        SELECT job_id, status, created_at
+        FROM generation_jobs
+        WHERE status IN ('submitted', 'running') AND comfy_prompt_id IS NULL
+        ORDER BY created_at DESC
+        LIMIT 20
+        """,
+    )
+
+    enabled_mappings = rows(
+        con,
+        "SELECT workflow_id, field_key FROM workflow_input_mappings WHERE is_enabled = 1 ORDER BY workflow_id, field_key",
+    )
+    mapping_fields: dict[str, set[str]] = {}
+    for item in enabled_mappings:
+        mapping_fields.setdefault(item["workflow_id"], set()).add(item["field_key"])
+    missing_mappings = []
+    for workflow in rows(con, "SELECT workflow_id, name, status FROM workflows ORDER BY updated_at DESC"):
+        missing = [field for field in REQUIRED_MAPPINGS if field not in mapping_fields.get(workflow["workflow_id"], set())]
+        if missing:
+            missing_mappings.append({"workflow_id": workflow["workflow_id"], "name": workflow["name"], "missing": missing})
+
+    storage_issues = []
+    for item in storage:
+        if not item.get("is_enabled", 1):
+            continue
+        adult_generated = item.get("content_scope") == "adult_local" and item.get("usage_type") == "generated"
+        unavailable = not item.get("path_exists") or not item.get("writable")
+        scope_risk = adult_generated and item.get("last_validation_result") not in (None, "ok")
+        if unavailable or scope_risk:
+            storage_issues.append(
+                {
+                    "storage_id": item["storage_id"],
+                    "name": item["name"],
+                    "content_scope": item.get("content_scope"),
+                    "validation": item.get("last_validation_result"),
+                    "path_exists": item.get("path_exists"),
+                    "writable": item.get("writable"),
+                }
+            )
+    adult_storage_ok = any(
+        item.get("content_scope") == "adult_local"
+        and item.get("is_enabled", 1)
+        and item.get("path_exists")
+        and item.get("writable")
+        and item.get("is_comfy_output_compatible")
+        for item in storage
+    )
+
+    warnings = []
+    if not connections.get("comfyui", {}).get("ok"):
+        warnings.append("ComfyUI is not connected.")
+    if not connections.get("ollama", {}).get("ok"):
+        warnings.append("Ollama is not connected.")
+    if not git.get("ok"):
+        warnings.append("Git status could not be read.")
+    if active_jobs:
+        warnings.append(f"{len(active_jobs)} generation job(s) are submitted or running.")
+    if prompt_id_missing:
+        warnings.append("Some active jobs do not have a ComfyUI prompt_id.")
+    if missing_mappings:
+        warnings.append("Some workflows are missing required input mappings.")
+    if storage_issues:
+        warnings.append("Some enabled storage locations need attention.")
+    if not adult_storage_ok:
+        warnings.append("Adult Local storage is not fully ready.")
+
+    migrations = rows(con, "SELECT version, applied_at FROM schema_migrations ORDER BY version")
+    return {
+        "generated_at": now_iso(),
+        "app": {"version": APP_VERSION},
+        "connections": connections,
+        "git": git,
+        "database": {
+            "path": str(DB_PATH),
+            "exists": DB_PATH.exists(),
+            "size_bytes": DB_PATH.stat().st_size if DB_PATH.exists() else 0,
+            "migrations": migrations,
+        },
+        "counts": counts,
+        "job_statuses": job_statuses,
+        "active_jobs": active_jobs,
+        "resync_candidates": resync_candidates,
+        "prompt_id_missing": prompt_id_missing,
+        "missing_mappings": missing_mappings,
+        "storage_issues": storage_issues,
+        "adult_storage_ok": adult_storage_ok,
+        "warnings": warnings,
+    }
+
+
+def diagnostics() -> dict[str, Any]:
+    with db() as con:
+        return {"ok": True, "diagnostics": diagnostics_summary(con)}
+
+
 def discover_workflows() -> list[dict[str, Any]]:
     base = ROOT / "workflows"
     if not base.exists():
@@ -966,6 +1105,8 @@ def bootstrap() -> dict[str, Any]:
             storage_status(item, output_root)
             for item in rows(con, "SELECT * FROM storage_locations ORDER BY content_scope, is_default DESC, name")
         ]
+        connections = connection_state(con)
+        git = git_state()
         workflows = rows(con, "SELECT * FROM workflows ORDER BY updated_at DESC")
         jobs = rows(con, "SELECT * FROM generation_jobs ORDER BY created_at DESC LIMIT 30")
         mappings = rows(con, "SELECT * FROM workflow_input_mappings WHERE is_enabled = 1 ORDER BY workflow_id, field_key")
@@ -1013,8 +1154,8 @@ def bootstrap() -> dict[str, Any]:
         discovered = discover_workflows()
         return {
             "app": {"name": "AI Media Factory Studio", "version": APP_VERSION},
-            "connections": connection_state(con),
-            "git": git_state(),
+            "connections": connections,
+            "git": git,
             "storage": storage,
             "workflows": workflows,
             "mappings": mappings,
@@ -1026,6 +1167,7 @@ def bootstrap() -> dict[str, Any]:
             "comparisons": list_comparisons({})["comparisons"],
             "tags": rows(con, "SELECT * FROM tags ORDER BY name"),
             "panel_state": get_setting(con, "panel_state", {}),
+            "diagnostics": diagnostics_summary(con, connections, git, storage),
         }
 
 
@@ -1077,6 +1219,9 @@ class Handler(SimpleHTTPRequestHandler):
             with db() as con:
                 self.send_json({"connections": connection_state(con), "git": git_state()})
             return
+        if self.path == "/api/diagnostics":
+            self.send_json(diagnostics())
+            return
         if self.path.startswith("/api/workflows/") and self.path.endswith("/mapping/candidates"):
             workflow_id = self.path.split("/")[3]
             self.send_json(get_mapping_candidates(workflow_id))
@@ -1121,6 +1266,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if self.path == "/api/jobs/poll":
                 self.send_json(poll_submitted_jobs())
+                return
+            if self.path == "/api/jobs/resync":
+                self.send_json(resync_generation_jobs(self.read_body()))
                 return
             if self.path == "/api/recipes":
                 self.send_json(create_recipe(self.read_body()))
@@ -1539,6 +1687,43 @@ def poll_submitted_jobs() -> dict[str, Any]:
     for job_id in job_ids:
         results.append(poll_job(job_id))
     return {"ok": True, "polled": results}
+
+
+def resync_generation_jobs(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    include_completed = bool(payload.get("include_completed", False))
+    try:
+        limit = max(1, min(int(payload.get("limit", 50)), 200))
+    except (TypeError, ValueError):
+        limit = 50
+    statuses = ["submitted", "running", "failed"]
+    if include_completed:
+        statuses.append("completed")
+    placeholders = ",".join("?" for _ in statuses)
+    with db() as con:
+        job_ids = [
+            item["job_id"]
+            for item in rows(
+                con,
+                f"""
+                SELECT job_id
+                FROM generation_jobs
+                WHERE comfy_prompt_id IS NOT NULL AND status IN ({placeholders})
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ?
+                """,
+                (*statuses, limit),
+            )
+        ]
+    results = []
+    for job_id in job_ids:
+        try:
+            results.append(poll_job(job_id))
+        except Exception as exc:
+            results.append({"ok": False, "job_id": job_id, "error": str(exc)})
+    with db() as con:
+        summary = diagnostics_summary(con)
+    return {"ok": True, "requested": len(job_ids), "include_completed": include_completed, "results": results, "diagnostics": summary}
 
 
 def poll_job(job_id: str) -> dict[str, Any]:

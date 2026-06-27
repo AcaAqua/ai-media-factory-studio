@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.7 - 2026-06-27
+
+- Added diagnostics API and diagnostics panel.
+- Added job resync endpoint and UI action.
+- Surfaced connection, database, job, storage, mapping, and Adult Local risks.
+- Updated About screen version to `v0.1.7`.
+
 ## v0.1.6 - 2026-06-27
 
 - Adopted Apache License 2.0.
