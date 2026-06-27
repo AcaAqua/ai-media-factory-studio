@@ -1,0 +1,2091 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import mimetypes
+import os
+import random
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import uuid
+from datetime import datetime, timezone
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, unquote, urlparse
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+
+
+APP_VERSION = "0.1.6"
+ROOT = Path(__file__).resolve().parents[1]
+STUDIO = ROOT / "studio"
+STATIC = STUDIO / "static"
+DATA = STUDIO / "data"
+DB_PATH = DATA / "media_factory.sqlite3"
+MIGRATIONS = DATA / "migrations"
+CONFIG = STUDIO / "config"
+THUMBNAILS = STUDIO / "thumbnails"
+DEFAULT_COMFY = "http://127.0.0.1:8188"
+DEFAULT_OLLAMA = "http://127.0.0.1:11434"
+CLIENT_ID = "ai-media-factory-studio"
+REQUIRED_MAPPINGS = ("positive_prompt", "seed", "width", "height", "output")
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+CONTENT_SCOPES = {"sfw", "sensitive", "adult_local"}
+STORAGE_SCOPES = {"general", "sensitive", "adult_local"}
+STORAGE_USAGE_TYPES = {"generated", "references", "exports", "thumbnails", "backups"}
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:16]}"
+
+
+def safe_slug(value: str, limit: int = 80) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_")
+    return (cleaned or "item")[:limit]
+
+
+def build_output_prefix(job_id: str, scope: str = "sfw", relative_dir: str = "") -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = f"amfs_{safe_slug(job_id, 32)}_{stamp}"
+    if relative_dir:
+        return f"{relative_dir.rstrip('/')}/{base}"
+    if scope == "sensitive":
+        return f"sensitive/{base}"
+    return base
+
+
+def path_under(child: Path, parent: Path) -> bool:
+    child_resolved = child.resolve()
+    parent_resolved = parent.resolve()
+    return child_resolved == parent_resolved or parent_resolved in child_resolved.parents
+
+
+def safe_relative_prefix(path: Path, root: Path) -> str | None:
+    try:
+        relative = path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return None
+    parts = [part for part in relative.split("/") if part]
+    if any(part in {".", ".."} for part in parts):
+        return None
+    return "/".join(parts)
+
+
+def configured_comfy_output_root(con: sqlite3.Connection | None = None) -> Path:
+    if con is not None:
+        value = get_setting(con, "comfy_output_root", None)
+        if value:
+            return Path(str(value))
+    return ROOT / "output" / "draft"
+
+
+def db() -> sqlite3.Connection:
+    DATA.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys = ON")
+    return con
+
+
+def run_migrations() -> None:
+    DATA.mkdir(parents=True, exist_ok=True)
+    THUMBNAILS.mkdir(parents=True, exist_ok=True)
+    with db() as con:
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+              version TEXT PRIMARY KEY,
+              applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        for path in sorted(MIGRATIONS.glob("*.sql")):
+            version = path.stem
+            applied = con.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (version,)).fetchone()
+            if applied:
+                continue
+            con.executescript(path.read_text(encoding="utf-8"))
+            con.execute("INSERT OR IGNORE INTO schema_migrations (version) VALUES (?)", (version,))
+        seed_defaults(con)
+
+
+def seed_defaults(con: sqlite3.Connection) -> None:
+    default_storage = ROOT / "output"
+    free = shutil.disk_usage(default_storage if default_storage.exists() else ROOT).free
+    con.execute(
+        """
+        INSERT OR IGNORE INTO storage_locations
+          (storage_id, name, base_path, type, is_default, is_available, writable, free_space_bytes)
+        VALUES (?, ?, ?, 'local', 1, 1, 1, ?)
+        """,
+        ("storage_default_output", "Default Output", str(default_storage), free),
+    )
+    con.execute(
+        """
+        INSERT OR IGNORE INTO storage_locations
+          (storage_id, name, base_path, type, is_default, is_available, writable, free_space_bytes)
+        VALUES (?, ?, ?, 'local', 0, 1, 1, ?)
+        """,
+        ("storage_studio_thumbnails", "Studio Thumbnails", str(THUMBNAILS), shutil.disk_usage(ROOT).free),
+    )
+    con.execute(
+        """
+        INSERT OR IGNORE INTO ollama_profiles
+          (profile_id, name, model_name, endpoint, role, is_default)
+        VALUES (?, ?, ?, ?, 'prompt_assistant', 1)
+        """,
+        ("ollama_qwen_ja_7b", "Japanese Prompt Assistant", "qwen-ja:7b", DEFAULT_OLLAMA),
+    )
+    set_setting(con, "comfy_endpoint", DEFAULT_COMFY)
+    set_setting(con, "ollama_endpoint", DEFAULT_OLLAMA)
+    set_setting(con, "comfy_output_root", str(ROOT / "output" / "draft"))
+    set_setting(con, "panel_state", {})
+
+
+def set_setting(con: sqlite3.Connection, key: str, value: Any) -> None:
+    con.execute(
+        """
+        INSERT INTO app_settings (key, value_json, updated_at)
+        VALUES (?, ?, datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = datetime('now')
+        """,
+        (key, json.dumps(value, ensure_ascii=False)),
+    )
+
+
+def get_setting(con: sqlite3.Connection, key: str, fallback: Any = None) -> Any:
+    row = con.execute("SELECT value_json FROM app_settings WHERE key = ?", (key,)).fetchone()
+    if not row:
+        return fallback
+    try:
+        return json.loads(row["value_json"])
+    except json.JSONDecodeError:
+        return fallback
+
+
+def rows(con: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    return [dict(row) for row in con.execute(sql, params).fetchall()]
+
+
+def row(con: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> dict[str, Any] | None:
+    result = con.execute(sql, params).fetchone()
+    return dict(result) if result else None
+
+
+def asset_tags(con: sqlite3.Connection, asset_id: str) -> list[str]:
+    return [
+        item["name"]
+        for item in rows(
+            con,
+            """
+            SELECT t.name
+            FROM tags t
+            JOIN asset_tags at ON at.tag_id = t.tag_id
+            WHERE at.asset_id = ?
+            ORDER BY t.name
+            """,
+            (asset_id,),
+        )
+    ]
+
+
+def recipe_tags(con: sqlite3.Connection, recipe_id: str) -> list[str]:
+    return [
+        item["name"]
+        for item in rows(
+            con,
+            """
+            SELECT t.name
+            FROM tags t
+            JOIN recipe_tags rt ON rt.tag_id = t.tag_id
+            WHERE rt.recipe_id = ?
+            ORDER BY t.name
+            """,
+            (recipe_id,),
+        )
+    ]
+
+
+def normalize_tags(tags: Any) -> list[str]:
+    if isinstance(tags, str):
+        raw = re.split(r"[,、\s]+", tags)
+    elif isinstance(tags, list):
+        raw = [str(item) for item in tags]
+    else:
+        raw = []
+    normalized = []
+    seen = set()
+    for item in raw:
+        tag = item.strip().lower()
+        tag = re.sub(r"[^a-z0-9_-]+", "-", tag).strip("-")
+        if tag and tag not in seen:
+            normalized.append(tag[:48])
+            seen.add(tag)
+    return normalized
+
+
+def parse_query_params(path: str) -> dict[str, str]:
+    parsed = urlparse(path)
+    params = parse_qs(parsed.query)
+    return {key: values[-1] for key, values in params.items() if values}
+
+
+def asset_select_sql(where_sql: str = "") -> str:
+    return f"""
+        SELECT
+          ma.*,
+          go.source_path,
+          go.file_name,
+          go.width AS output_width,
+          go.height AS output_height,
+          gj.prompt,
+          gj.negative_prompt,
+          gj.parameters_json,
+          gj.output_prefix,
+          gj.workflow_id,
+          wf.name AS workflow_name,
+          r.recipe_id AS recipe_id,
+          r.name AS recipe_name
+        FROM media_assets ma
+        LEFT JOIN generation_jobs gj ON gj.job_id = ma.source_job_id
+        LEFT JOIN generation_job_outputs go ON go.asset_id = ma.asset_id
+        LEFT JOIN workflows wf ON wf.workflow_id = gj.workflow_id
+        LEFT JOIN recipes r ON r.source_asset_id = ma.asset_id
+        {where_sql}
+        GROUP BY ma.asset_id
+        ORDER BY ma.created_at DESC
+    """
+
+
+def hydrate_assets(con: sqlite3.Connection, assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for asset in assets:
+        asset["tags"] = asset_tags(con, asset["asset_id"])
+    return assets
+
+
+def list_assets(filters: dict[str, str]) -> dict[str, Any]:
+    clauses = []
+    params: list[Any] = []
+
+    query = filters.get("query", "").strip()
+    if query:
+        like = f"%{query}%"
+        clauses.append(
+            """(
+              ma.relative_path LIKE ? OR go.file_name LIKE ? OR gj.prompt LIKE ? OR gj.negative_prompt LIKE ?
+              OR ma.note LIKE ? OR ma.comparison_note LIKE ? OR wf.name LIKE ? OR r.name LIKE ?
+              OR gj.output_prefix LIKE ? OR gj.parameters_json LIKE ?
+            )"""
+        )
+        params.extend([like] * 10)
+
+    status = filters.get("status", "")
+    if status:
+        clauses.append("ma.status = ?")
+        params.append(status)
+
+    quick = filters.get("quick", "")
+    if quick == "approved":
+        clauses.append("ma.status = 'approved'")
+    elif quick == "candidate":
+        clauses.append("ma.status = 'candidate'")
+    elif quick == "not_rejected":
+        clauses.append("ma.status != 'rejected'")
+    elif quick == "recent":
+        clauses.append("ma.created_at >= datetime('now', '-7 days')")
+
+    rating = filters.get("rating", "")
+    if rating:
+        try:
+            clauses.append("ma.rating >= ?")
+            params.append(int(rating))
+        except ValueError:
+            pass
+
+    scope = filters.get("content_scope", "")
+    if scope:
+        clauses.append("ma.content_scope = ?")
+        params.append(scope)
+
+    workflow_id = filters.get("workflow_id", "")
+    if workflow_id:
+        clauses.append("gj.workflow_id = ?")
+        params.append(workflow_id)
+
+    recipe_id = filters.get("recipe_id", "")
+    if recipe_id:
+        clauses.append("r.recipe_id = ?")
+        params.append(recipe_id)
+
+    period = filters.get("period", "")
+    if period == "today":
+        clauses.append("ma.created_at >= date('now')")
+    elif period == "week":
+        clauses.append("ma.created_at >= datetime('now', '-7 days')")
+    elif period == "month":
+        clauses.append("ma.created_at >= datetime('now', '-30 days')")
+
+    tags = normalize_tags(filters.get("tags", ""))
+    if tags == ["untagged"]:
+        clauses.append("NOT EXISTS (SELECT 1 FROM asset_tags at WHERE at.asset_id = ma.asset_id)")
+    else:
+        for tag in tags:
+            clauses.append(
+                """
+                EXISTS (
+                  SELECT 1
+                  FROM asset_tags at
+                  JOIN tags t ON t.tag_id = at.tag_id
+                  WHERE at.asset_id = ma.asset_id AND t.name = ?
+                )
+                """
+            )
+            params.append(tag)
+
+    where_sql = "WHERE " + " AND ".join(clauses) if clauses else ""
+    limit = min(max(int(filters.get("limit", "80") or 80), 1), 200)
+    sql = asset_select_sql(where_sql) + " LIMIT ?"
+    params.append(limit)
+    with db() as con:
+        assets = rows(con, sql, tuple(params))
+        hydrate_assets(con, assets)
+    return {"ok": True, "assets": assets, "count": len(assets)}
+
+
+def storage_status(storage: dict[str, Any], comfy_output_root: Path | None = None) -> dict[str, Any]:
+    path = Path(storage["base_path"])
+    exists = path.exists() and path.is_dir()
+    output_root = comfy_output_root or (ROOT / "output" / "draft")
+    relative_path = safe_relative_prefix(path, output_root) if exists else None
+    output_compatible = bool(exists and relative_path is not None)
+    free_space = None
+    if exists:
+        try:
+            free_space = shutil.disk_usage(path).free
+        except OSError:
+            free_space = None
+    result = dict(storage)
+    result["path_exists"] = exists
+    result["free_space_bytes"] = free_space if free_space is not None else storage.get("free_space_bytes")
+    result["comfy_output_root"] = str(output_root)
+    result["comfy_output_relative_path"] = relative_path or storage.get("comfy_output_relative_path")
+    result["is_comfy_output_compatible"] = 1 if output_compatible else 0
+    if not exists:
+        result["last_validation_result"] = "path_missing"
+    elif not output_compatible:
+        result["last_validation_result"] = "outside_comfy_output_root"
+    elif not storage.get("is_enabled", 1):
+        result["last_validation_result"] = "disabled"
+    elif not storage.get("writable", 1):
+        result["last_validation_result"] = "not_writable"
+    else:
+        result["last_validation_result"] = "ok"
+    return result
+
+
+def list_storage_locations() -> dict[str, Any]:
+    with db() as con:
+        output_root = configured_comfy_output_root(con)
+        storage = rows(con, "SELECT * FROM storage_locations ORDER BY content_scope, is_default DESC, name")
+    return {"ok": True, "storage": [storage_status(item, output_root) for item in storage]}
+
+
+def validate_storage_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    name = str(payload.get("name") or "").strip()
+    base_path = str(payload.get("base_path") or "").strip()
+    content_scope = str(payload.get("content_scope") or "general")
+    usage_type = str(payload.get("usage_type") or "generated")
+    if not name:
+        raise ValueError("storage name is required")
+    if not base_path:
+        raise ValueError("base path is required")
+    path = Path(base_path)
+    if not path.is_absolute():
+        raise ValueError("base path must be absolute")
+    if content_scope not in STORAGE_SCOPES:
+        raise ValueError("invalid storage content scope")
+    if usage_type not in STORAGE_USAGE_TYPES:
+        raise ValueError("invalid storage usage type")
+    return {
+        "name": name,
+        "base_path": str(path),
+        "content_scope": content_scope,
+        "usage_type": usage_type,
+        "is_default": 1 if payload.get("is_default") else 0,
+        "is_enabled": 1 if payload.get("is_enabled", True) else 0,
+    }
+
+
+def create_storage_location(payload: dict[str, Any]) -> dict[str, Any]:
+    data = validate_storage_payload(payload)
+    storage_id = payload.get("storage_id") or new_id("storage")
+    path = Path(data["base_path"])
+    exists = path.exists() and path.is_dir()
+    free = shutil.disk_usage(path).free if exists else None
+    with db() as con:
+        output_root = configured_comfy_output_root(con)
+        relative_path = safe_relative_prefix(path, output_root) if exists else None
+        compatible = 1 if relative_path is not None else 0
+        validation_result = "ok" if compatible else ("path_missing" if not exists else "outside_comfy_output_root")
+        if data["is_default"]:
+            con.execute(
+                "UPDATE storage_locations SET is_default = 0 WHERE content_scope = ? AND usage_type = ?",
+                (data["content_scope"], data["usage_type"]),
+            )
+        con.execute(
+            """
+            INSERT INTO storage_locations
+              (storage_id, name, base_path, type, is_default, is_available, writable, free_space_bytes,
+               content_scope, usage_type, is_enabled, last_checked_at, updated_at,
+               comfy_output_relative_path, is_comfy_output_compatible, last_validation_result)
+            VALUES (?, ?, ?, 'local', ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?, ?, ?)
+            """,
+            (
+                storage_id,
+                data["name"],
+                data["base_path"],
+                data["is_default"],
+                1 if exists else 0,
+                1 if exists else 0,
+                free,
+                data["content_scope"],
+                data["usage_type"],
+                data["is_enabled"],
+                relative_path,
+                compatible,
+                validation_result,
+            ),
+        )
+        con.execute(
+            "INSERT INTO audit_logs (audit_id, action, entity_type, entity_id, detail_json) VALUES (?, 'create', 'storage_location', ?, ?)",
+            (new_id("aud"), storage_id, json.dumps(data, ensure_ascii=False)),
+        )
+    return get_storage_location(storage_id)
+
+
+def get_storage_location(storage_id: str) -> dict[str, Any]:
+    with db() as con:
+        output_root = configured_comfy_output_root(con)
+        storage = row(con, "SELECT * FROM storage_locations WHERE storage_id = ?", (storage_id,))
+        if not storage:
+            raise ValueError("storage location not found")
+    return {"ok": True, "storage": storage_status(storage, output_root)}
+
+
+def update_storage_location(storage_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    with db() as con:
+        existing = row(con, "SELECT * FROM storage_locations WHERE storage_id = ?", (storage_id,))
+        if not existing:
+            raise ValueError("storage location not found")
+    merged = {**existing, **payload}
+    data = validate_storage_payload(merged)
+    path = Path(data["base_path"])
+    exists = path.exists() and path.is_dir()
+    free = shutil.disk_usage(path).free if exists else None
+    with db() as con:
+        output_root = configured_comfy_output_root(con)
+        relative_path = safe_relative_prefix(path, output_root) if exists else None
+        compatible = 1 if relative_path is not None else 0
+        validation_result = "ok" if compatible else ("path_missing" if not exists else "outside_comfy_output_root")
+        if data["is_default"]:
+            con.execute(
+                "UPDATE storage_locations SET is_default = 0 WHERE content_scope = ? AND usage_type = ? AND storage_id != ?",
+                (data["content_scope"], data["usage_type"], storage_id),
+            )
+        con.execute(
+            """
+            UPDATE storage_locations
+            SET name = ?, base_path = ?, is_default = ?, is_available = ?, writable = ?, free_space_bytes = ?,
+                content_scope = ?, usage_type = ?, is_enabled = ?, last_checked_at = datetime('now'), updated_at = datetime('now'),
+                comfy_output_relative_path = ?, is_comfy_output_compatible = ?, last_validation_result = ?
+            WHERE storage_id = ?
+            """,
+            (
+                data["name"],
+                data["base_path"],
+                data["is_default"],
+                1 if exists else 0,
+                1 if exists else 0,
+                free,
+                data["content_scope"],
+                data["usage_type"],
+                data["is_enabled"],
+                relative_path,
+                compatible,
+                validation_result,
+                storage_id,
+            ),
+        )
+        con.execute(
+            "INSERT INTO audit_logs (audit_id, action, entity_type, entity_id, detail_json) VALUES (?, 'update', 'storage_location', ?, ?)",
+            (new_id("aud"), storage_id, json.dumps(data, ensure_ascii=False)),
+        )
+    return get_storage_location(storage_id)
+
+
+def test_storage_location(payload: dict[str, Any]) -> dict[str, Any]:
+    base_path = str(payload.get("base_path") or "")
+    storage_id = payload.get("storage_id")
+    if storage_id and not base_path:
+        with db() as con:
+            storage = row(con, "SELECT * FROM storage_locations WHERE storage_id = ?", (storage_id,))
+        if not storage:
+            raise ValueError("storage location not found")
+        base_path = storage["base_path"]
+    path = Path(base_path)
+    exists = path.exists() and path.is_dir()
+    writable = False
+    error = None
+    free = None
+    if exists:
+        try:
+            free = shutil.disk_usage(path).free
+            test_file = path / f".amfs_write_test_{uuid.uuid4().hex}.tmp"
+            test_file.write_text("ok", encoding="utf-8")
+            test_file.unlink()
+            writable = True
+        except Exception as exc:
+            error = str(exc)
+    else:
+        error = "path does not exist or is not a directory"
+    if storage_id:
+        with db() as con:
+            output_root = configured_comfy_output_root(con)
+            relative_path = safe_relative_prefix(path, output_root) if exists else None
+            compatible = 1 if relative_path is not None else 0
+            validation_result = "ok" if exists and writable and compatible else (
+                error or ("outside_comfy_output_root" if exists and not compatible else "not_writable")
+            )
+            con.execute(
+                """
+                UPDATE storage_locations
+                SET is_available = ?, writable = ?, free_space_bytes = ?, last_checked_at = datetime('now'), updated_at = datetime('now'),
+                    comfy_output_relative_path = ?, is_comfy_output_compatible = ?, last_validation_result = ?
+                WHERE storage_id = ?
+                """,
+                (1 if exists else 0, 1 if writable else 0, free, relative_path, compatible, validation_result, storage_id),
+            )
+    return {"ok": exists and writable, "path_exists": exists, "writable": writable, "free_space_bytes": free, "error": error}
+
+
+def board_assets(filters: dict[str, str]) -> dict[str, Any]:
+    filters = dict(filters)
+    filters["status"] = "approved"
+    result = list_assets(filters)
+    return {"ok": True, "assets": result["assets"], "count": result["count"]}
+
+
+def list_comparisons(filters: dict[str, str] | None = None) -> dict[str, Any]:
+    status = (filters or {}).get("status", "active")
+    params: tuple[Any, ...] = ()
+    where = ""
+    if status:
+        where = "WHERE cs.status = ?"
+        params = (status,)
+    with db() as con:
+        comparisons = rows(
+            con,
+            f"""
+            SELECT
+              cs.*,
+              COUNT(csi.asset_id) AS asset_count,
+              SUM(CASE WHEN ma.status = 'approved' THEN 1 ELSE 0 END) AS approved_count
+            FROM comparison_sets cs
+            LEFT JOIN comparison_set_items csi ON csi.comparison_id = cs.comparison_id
+            LEFT JOIN media_assets ma ON ma.asset_id = csi.asset_id
+            {where}
+            GROUP BY cs.comparison_id
+            ORDER BY cs.updated_at DESC
+            LIMIT 100
+            """,
+            params,
+        )
+    return {"ok": True, "comparisons": comparisons}
+
+
+def ensure_tag(con: sqlite3.Connection, name: str, category: str = "asset") -> str:
+    tag = row(con, "SELECT tag_id FROM tags WHERE name = ?", (name,))
+    if tag:
+        return tag["tag_id"]
+    tag_id = new_id("tag")
+    con.execute("INSERT INTO tags (tag_id, name, category) VALUES (?, ?, ?)", (tag_id, name, category))
+    return tag_id
+
+
+def request_json(url: str, timeout: float = 1.5) -> tuple[bool, Any]:
+    try:
+        with urlopen(url, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            return True, json.loads(raw) if raw else {}
+    except Exception as exc:
+        return False, str(exc)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_workflow_json(relative_path: str) -> dict[str, Any]:
+    workflow_path = (ROOT / relative_path).resolve()
+    if not workflow_path.exists() or ROOT not in workflow_path.parents:
+        raise ValueError("workflow file is outside the workspace or missing")
+    return json.loads(workflow_path.read_text(encoding="utf-8"))
+
+
+def workflow_nodes(workflow_json: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = []
+    for node_id, node in workflow_json.items():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs", {})
+        if not isinstance(inputs, dict):
+            inputs = {}
+        meta = node.get("_meta", {}) if isinstance(node.get("_meta"), dict) else {}
+        nodes.append(
+            {
+                "node_id": str(node_id),
+                "title": meta.get("title") or node.get("class_type") or str(node_id),
+                "class_type": node.get("class_type", ""),
+                "inputs": inputs,
+            }
+        )
+    return nodes
+
+
+def infer_input_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "link"
+    return "text"
+
+
+def candidate_score(
+    field_key: str,
+    class_type: str,
+    input_key: str,
+    title: str,
+    node_id: str,
+    positive_nodes: set[str],
+    negative_nodes: set[str],
+) -> int:
+    haystack = f"{class_type} {input_key} {title}".lower()
+    class_lower = class_type.lower()
+    if field_key == "positive_prompt":
+        if "cliptextencode" not in class_lower or input_key != "text":
+            return 0
+        return 8 if node_id in positive_nodes else 2
+    if field_key == "negative_prompt":
+        if "cliptextencode" not in class_lower or input_key != "text":
+            return 0
+        return 8 if node_id in negative_nodes else 2
+    exact_rules = {
+        "seed": ("ksampler", {"seed", "noise_seed"}),
+        "steps": ("ksampler", {"steps"}),
+        "cfg": ("ksampler", {"cfg"}),
+        "sampler": ("ksampler", {"sampler_name"}),
+        "scheduler": ("ksampler", {"scheduler"}),
+        "width": ("emptylatentimage", {"width"}),
+        "height": ("emptylatentimage", {"height"}),
+        "checkpoint": ("checkpointloadersimple", {"ckpt_name"}),
+        "lora": ("loraloader", {"lora_name"}),
+        "output": ("saveimage", {"filename_prefix"}),
+    }
+    class_token, input_keys = exact_rules.get(field_key, ("", set()))
+    if class_token and class_token in class_lower and input_key in input_keys:
+        return 6
+    if field_key in {"checkpoint", "lora"} and input_key in input_keys:
+        return 2
+    return 0
+
+
+def detect_mapping_candidates(workflow_json: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    fields = [
+        "positive_prompt",
+        "negative_prompt",
+        "seed",
+        "width",
+        "height",
+        "steps",
+        "cfg",
+        "sampler",
+        "scheduler",
+        "checkpoint",
+        "lora",
+        "output",
+    ]
+    candidates: dict[str, list[dict[str, Any]]] = {field: [] for field in fields}
+    positive_nodes: set[str] = set()
+    negative_nodes: set[str] = set()
+    for node in workflow_nodes(workflow_json):
+        if "ksampler" not in node["class_type"].lower():
+            continue
+        positive = node["inputs"].get("positive")
+        negative = node["inputs"].get("negative")
+        if isinstance(positive, list) and positive:
+            positive_nodes.add(str(positive[0]))
+        if isinstance(negative, list) and negative:
+            negative_nodes.add(str(negative[0]))
+    for node in workflow_nodes(workflow_json):
+        for input_key, value in node["inputs"].items():
+            for field in fields:
+                score = candidate_score(
+                    field,
+                    node["class_type"],
+                    input_key,
+                    node["title"],
+                    node["node_id"],
+                    positive_nodes,
+                    negative_nodes,
+                )
+                if score <= 0:
+                    continue
+                candidates[field].append(
+                    {
+                        "node_id": node["node_id"],
+                        "input_key": input_key,
+                        "input_type": infer_input_type(value),
+                        "class_type": node["class_type"],
+                        "title": node["title"],
+                        "current_value": value if not isinstance(value, list) else "[link]",
+                        "score": score,
+                    }
+                )
+    for field in candidates:
+        candidates[field].sort(key=lambda item: item["score"], reverse=True)
+    return candidates
+
+
+def field_value(field_key: str, prompt: str, negative: str, parameters: dict[str, Any]) -> Any:
+    if field_key == "positive_prompt":
+        return prompt
+    if field_key == "negative_prompt":
+        return negative
+    if field_key == "seed":
+        seed = parameters.get("seed", "random")
+        if seed in ("", None, "random"):
+            return random.randint(0, 2**32 - 1)
+        return int(seed)
+    if field_key == "width":
+        return int(parameters.get("width") or 1024)
+    if field_key == "height":
+        return int(parameters.get("height") or 1024)
+    if field_key == "steps":
+        return int(parameters.get("steps") or 20)
+    if field_key == "cfg":
+        return float(parameters.get("cfg") or 7)
+    if field_key == "sampler":
+        return parameters.get("sampler") or None
+    if field_key == "scheduler":
+        return parameters.get("scheduler") or None
+    if field_key == "checkpoint":
+        return parameters.get("model") or None
+    if field_key == "lora":
+        return parameters.get("lora") or None
+    if field_key == "output":
+        return parameters.get("filename_prefix") or "studio"
+    return None
+
+
+def apply_mappings(
+    workflow_json: dict[str, Any],
+    mappings: list[dict[str, Any]],
+    prompt: str,
+    negative: str,
+    parameters: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    prepared = json.loads(json.dumps(workflow_json))
+    applied: list[str] = []
+    for mapping in mappings:
+        field_key = mapping["field_key"]
+        value = field_value(field_key, prompt, negative, parameters)
+        if value in (None, "") and field_key not in REQUIRED_MAPPINGS:
+            continue
+        node_id = str(mapping["node_id"])
+        input_key = mapping["input_key"]
+        if node_id not in prepared or "inputs" not in prepared[node_id]:
+            raise ValueError(f"Mapping target not found: {field_key}")
+        prepared[node_id]["inputs"][input_key] = value
+        applied.append(field_key)
+    return prepared, applied
+
+
+def missing_required_mappings(mappings: list[dict[str, Any]], negative: str = "") -> list[str]:
+    enabled = {mapping["field_key"] for mapping in mappings if mapping.get("is_enabled", 1)}
+    required = set(REQUIRED_MAPPINGS)
+    if negative:
+        required.add("negative_prompt")
+    return [field for field in sorted(required) if field not in enabled]
+
+
+def media_type_for(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext in IMAGE_EXTENSIONS:
+        return "image"
+    return "other"
+
+
+def image_dimensions(path: Path) -> tuple[int | None, int | None]:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            return image.size
+    except Exception:
+        return None, None
+
+
+def make_thumbnail(source: Path, asset_id: str) -> tuple[str | None, str | None]:
+    try:
+        from PIL import Image
+
+        THUMBNAILS.mkdir(parents=True, exist_ok=True)
+        thumb_name = f"{asset_id}.webp"
+        thumb_path = THUMBNAILS / thumb_name
+        with Image.open(source) as image:
+            image.thumbnail((360, 360))
+            image.save(thumb_path, "WEBP", quality=82)
+        return "storage_studio_thumbnails", thumb_name
+    except Exception:
+        return None, None
+
+
+def resolve_comfy_image(image_info: dict[str, Any]) -> Path:
+    filename = image_info.get("filename")
+    if not filename:
+        raise ValueError("ComfyUI image output is missing filename")
+    subfolder = image_info.get("subfolder") or ""
+    image_type = image_info.get("type") or "output"
+    if image_type == "input":
+        base = ROOT / "input"
+    elif image_type == "temp":
+        base = ROOT / "ComfyUI" / "temp"
+    else:
+        base = ROOT / "output"
+    direct = (base / subfolder / filename).resolve()
+    if direct.exists():
+        return direct
+    if image_type == "output":
+        matches = sorted((ROOT / "output").rglob(filename))
+        if matches:
+            return matches[0].resolve()
+    return direct
+
+
+def relative_to_storage(path: Path, storage_base: Path) -> str:
+    try:
+        return path.relative_to(storage_base).as_posix()
+    except ValueError:
+        return path.name
+
+
+
+def post_json(url: str, payload: dict[str, Any], timeout: float = 5.0) -> tuple[bool, Any]:
+    data = json.dumps(payload).encode("utf-8")
+    req = Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urlopen(req, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            return True, json.loads(raw) if raw else {}
+    except Exception as exc:
+        return False, str(exc)
+
+
+def connection_state(con: sqlite3.Connection) -> dict[str, Any]:
+    comfy_endpoint = get_setting(con, "comfy_endpoint", DEFAULT_COMFY)
+    ollama_endpoint = get_setting(con, "ollama_endpoint", DEFAULT_OLLAMA)
+    comfy_ok, comfy_payload = request_json(f"{comfy_endpoint}/system_stats")
+    ollama_ok, ollama_payload = request_json(f"{ollama_endpoint}/api/tags")
+    return {
+        "comfyui": {
+            "endpoint": comfy_endpoint,
+            "ok": comfy_ok,
+            "detail": "connected" if comfy_ok else str(comfy_payload),
+        },
+        "ollama": {
+            "endpoint": ollama_endpoint,
+            "ok": ollama_ok,
+            "models": [m.get("name") for m in ollama_payload.get("models", [])] if ollama_ok else [],
+            "detail": "connected" if ollama_ok else str(ollama_payload),
+        },
+    }
+
+
+def git_state() -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--short", "--branch"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        return {
+            "ok": proc.returncode == 0,
+            "output": proc.stdout.strip() if proc.returncode == 0 else proc.stderr.strip(),
+        }
+    except Exception as exc:
+        return {"ok": False, "output": str(exc)}
+
+
+def discover_workflows() -> list[dict[str, Any]]:
+    base = ROOT / "workflows"
+    if not base.exists():
+        return []
+    found = []
+    for path in sorted(base.rglob("*.json")):
+        try:
+            rel = path.relative_to(ROOT).as_posix()
+        except ValueError:
+            rel = str(path)
+        found.append({"name": path.stem, "relative_path": rel, "size": path.stat().st_size})
+    return found
+
+
+def bootstrap() -> dict[str, Any]:
+    with db() as con:
+        output_root = configured_comfy_output_root(con)
+        storage = [
+            storage_status(item, output_root)
+            for item in rows(con, "SELECT * FROM storage_locations ORDER BY content_scope, is_default DESC, name")
+        ]
+        workflows = rows(con, "SELECT * FROM workflows ORDER BY updated_at DESC")
+        jobs = rows(con, "SELECT * FROM generation_jobs ORDER BY created_at DESC LIMIT 30")
+        mappings = rows(con, "SELECT * FROM workflow_input_mappings WHERE is_enabled = 1 ORDER BY workflow_id, field_key")
+        outputs = rows(con, "SELECT * FROM generation_job_outputs ORDER BY created_at DESC LIMIT 100")
+        assets = rows(
+            con,
+            """
+            SELECT
+              ma.*,
+              go.source_path,
+              go.file_name,
+              go.width AS output_width,
+              go.height AS output_height,
+              gj.prompt,
+              gj.negative_prompt,
+              gj.parameters_json,
+              gj.output_prefix,
+              gj.workflow_id,
+              wf.name AS workflow_name
+            FROM media_assets ma
+            LEFT JOIN generation_jobs gj ON gj.job_id = ma.source_job_id
+            LEFT JOIN generation_job_outputs go ON go.asset_id = ma.asset_id
+            LEFT JOIN workflows wf ON wf.workflow_id = gj.workflow_id
+            ORDER BY ma.created_at DESC
+            LIMIT 60
+            """,
+        )
+        hydrate_assets(con, assets)
+        recipes = rows(
+            con,
+            """
+            SELECT
+              r.*,
+              wf.name AS workflow_name,
+              ma.thumbnail_relative_path AS source_thumbnail
+            FROM recipes r
+            LEFT JOIN workflows wf ON wf.workflow_id = r.workflow_id
+            LEFT JOIN media_assets ma ON ma.asset_id = r.source_asset_id
+            ORDER BY r.updated_at DESC
+            LIMIT 100
+            """,
+        )
+        for recipe in recipes:
+            recipe["tags"] = recipe_tags(con, recipe["recipe_id"])
+        discovered = discover_workflows()
+        return {
+            "app": {"name": "AI Media Factory Studio", "version": APP_VERSION},
+            "connections": connection_state(con),
+            "git": git_state(),
+            "storage": storage,
+            "workflows": workflows,
+            "mappings": mappings,
+            "discovered_workflows": discovered,
+            "jobs": jobs,
+            "outputs": outputs,
+            "assets": assets,
+            "recipes": recipes,
+            "comparisons": list_comparisons({})["comparisons"],
+            "tags": rows(con, "SELECT * FROM tags ORDER BY name"),
+            "panel_state": get_setting(con, "panel_state", {}),
+        }
+
+
+class Handler(SimpleHTTPRequestHandler):
+    def translate_path(self, path: str) -> str:
+        if path == "/" or not path.startswith("/api/"):
+            cleaned = path.split("?", 1)[0].split("#", 1)[0]
+            if cleaned == "/":
+                cleaned = "/index.html"
+            return str((STATIC / cleaned.lstrip("/")).resolve())
+        return super().translate_path(path)
+
+    def end_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def send_json(self, payload: Any, status: int = 200) -> None:
+        raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def read_body(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length == 0:
+            return {}
+        raw = self.rfile.read(length).decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+    def do_GET(self) -> None:
+        if self.path.startswith("/api/bootstrap"):
+            self.send_json(bootstrap())
+            return
+        if self.path == "/api/assets" or self.path.startswith("/api/assets?"):
+            self.send_json(list_assets(parse_query_params(self.path)))
+            return
+        if self.path == "/api/board" or self.path.startswith("/api/board?"):
+            self.send_json(board_assets(parse_query_params(self.path)))
+            return
+        if self.path == "/api/storage":
+            self.send_json(list_storage_locations())
+            return
+        if self.path == "/api/comparisons" or self.path.startswith("/api/comparisons?"):
+            self.send_json(list_comparisons(parse_query_params(self.path)))
+            return
+        if self.path.startswith("/api/health"):
+            with db() as con:
+                self.send_json({"connections": connection_state(con), "git": git_state()})
+            return
+        if self.path.startswith("/api/workflows/") and self.path.endswith("/mapping/candidates"):
+            workflow_id = self.path.split("/")[3]
+            self.send_json(get_mapping_candidates(workflow_id))
+            return
+        if self.path.startswith("/api/workflows/") and self.path.endswith("/mapping"):
+            workflow_id = self.path.split("/")[3]
+            self.send_json(get_workflow_mapping(workflow_id))
+            return
+        if self.path.startswith("/api/assets/") and self.path.endswith("/thumbnail"):
+            asset_id = self.path.split("/")[3]
+            self.send_file_response(asset_thumbnail_path(asset_id))
+            return
+        if self.path.startswith("/api/assets/") and self.path.endswith("/file"):
+            asset_id = self.path.split("/")[3]
+            self.send_file_response(asset_file_path(asset_id))
+            return
+        if self.path.startswith("/api/assets/"):
+            asset_id = self.path.split("/")[3]
+            self.send_json(get_asset_detail(asset_id))
+            return
+        if self.path.startswith("/api/recipes/"):
+            recipe_id = self.path.split("/")[3]
+            self.send_json(get_recipe_detail(recipe_id))
+            return
+        if self.path.startswith("/api/comparisons/"):
+            comparison_id = self.path.split("/")[3]
+            self.send_json(get_comparison(comparison_id))
+            return
+        super().do_GET()
+
+    def do_POST(self) -> None:
+        try:
+            if self.path == "/api/workflows/register":
+                self.send_json(register_workflow(self.read_body()))
+                return
+            if self.path.startswith("/api/workflows/") and self.path.endswith("/mapping"):
+                workflow_id = self.path.split("/")[3]
+                self.send_json(save_workflow_mapping(workflow_id, self.read_body()))
+                return
+            if self.path == "/api/generate":
+                self.send_json(create_generation_job(self.read_body()))
+                return
+            if self.path == "/api/jobs/poll":
+                self.send_json(poll_submitted_jobs())
+                return
+            if self.path == "/api/recipes":
+                self.send_json(create_recipe(self.read_body()))
+                return
+            if self.path == "/api/storage":
+                self.send_json(create_storage_location(self.read_body()))
+                return
+            if self.path == "/api/storage/test":
+                self.send_json(test_storage_location(self.read_body()))
+                return
+            if self.path == "/api/comparisons":
+                self.send_json(create_comparison(self.read_body()))
+                return
+            if self.path.startswith("/api/comparisons/") and self.path.endswith("/duplicate"):
+                comparison_id = self.path.split("/")[3]
+                self.send_json(duplicate_comparison(comparison_id))
+                return
+            if self.path.startswith("/api/comparisons/") and self.path.endswith("/archive"):
+                comparison_id = self.path.split("/")[3]
+                self.send_json(update_comparison(comparison_id, {"status": "archived"}))
+                return
+            if self.path.startswith("/api/recipes/") and self.path.endswith("/use"):
+                recipe_id = self.path.split("/")[3]
+                self.send_json(use_recipe(recipe_id))
+                return
+            if self.path.startswith("/api/recipes/") and self.path.endswith("/duplicate"):
+                recipe_id = self.path.split("/")[3]
+                self.send_json(duplicate_recipe(recipe_id))
+                return
+            if self.path == "/api/settings/panel-state":
+                self.send_json(save_panel_state(self.read_body()))
+                return
+            if self.path.startswith("/api/jobs/") and self.path.endswith("/poll"):
+                job_id = self.path.split("/")[3]
+                self.send_json(poll_job(job_id))
+                return
+            if self.path.startswith("/api/jobs/") and self.path.endswith("/regenerate"):
+                job_id = self.path.split("/")[3]
+                self.send_json(regenerate_job(job_id))
+                return
+            self.send_json({"error": "not_found"}, 404)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 500)
+
+    def send_file_response(self, path: Path | None) -> None:
+        if not path or not path.exists() or not path.is_file():
+            self.send_json({"error": "file_not_found"}, 404)
+            return
+        mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        data = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_PATCH(self) -> None:
+        try:
+            if self.path.startswith("/api/assets/"):
+                asset_id = self.path.split("/")[3]
+                self.send_json(update_asset(asset_id, self.read_body()))
+                return
+            if self.path.startswith("/api/storage/"):
+                storage_id = self.path.split("/")[3]
+                self.send_json(update_storage_location(storage_id, self.read_body()))
+                return
+            if self.path.startswith("/api/comparisons/"):
+                comparison_id = self.path.split("/")[3]
+                self.send_json(update_comparison(comparison_id, self.read_body()))
+                return
+            if self.path.startswith("/api/recipes/"):
+                recipe_id = self.path.split("/")[3]
+                self.send_json(update_recipe(recipe_id, self.read_body()))
+                return
+            self.send_json({"error": "not_found"}, 404)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 500)
+
+
+def register_workflow(payload: dict[str, Any]) -> dict[str, Any]:
+    relative_path = str(payload.get("relative_path", "")).replace("\\", "/")
+    if not relative_path:
+        raise ValueError("relative_path is required")
+    path = (ROOT / relative_path).resolve()
+    if not path.exists() or ROOT not in path.parents:
+        raise ValueError("workflow file is outside the workspace or missing")
+    workflow_id = payload.get("workflow_id") or new_id("wf")
+    name = payload.get("name") or path.stem
+    with db() as con:
+        con.execute(
+            """
+            INSERT INTO workflows (workflow_id, name, relative_path, notes, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(relative_path) DO UPDATE SET
+              name = excluded.name,
+              notes = excluded.notes,
+              updated_at = datetime('now')
+            """,
+            (workflow_id, name, relative_path, payload.get("notes")),
+        )
+        con.execute(
+            "INSERT INTO audit_logs (audit_id, action, entity_type, entity_id, detail_json) VALUES (?, 'register', 'workflow', ?, ?)",
+            (new_id("aud"), workflow_id, json.dumps({"relative_path": relative_path}, ensure_ascii=False)),
+        )
+    return {"ok": True, "workflow_id": workflow_id, "relative_path": relative_path}
+
+
+def get_workflow_or_fail(con: sqlite3.Connection, workflow_id: str) -> dict[str, Any]:
+    workflow = row(con, "SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,))
+    if not workflow:
+        raise ValueError("workflow not found")
+    return workflow
+
+
+def get_mapping_candidates(workflow_id: str) -> dict[str, Any]:
+    with db() as con:
+        workflow = get_workflow_or_fail(con, workflow_id)
+    workflow_json = read_workflow_json(workflow["relative_path"])
+    return {
+        "workflow_id": workflow_id,
+        "candidates": detect_mapping_candidates(workflow_json),
+        "nodes": workflow_nodes(workflow_json),
+    }
+
+
+def get_workflow_mapping(workflow_id: str) -> dict[str, Any]:
+    with db() as con:
+        workflow = get_workflow_or_fail(con, workflow_id)
+        mappings = rows(
+            con,
+            "SELECT * FROM workflow_input_mappings WHERE workflow_id = ? AND is_enabled = 1 ORDER BY field_key",
+            (workflow_id,),
+        )
+    return {"workflow": workflow, "mappings": mappings}
+
+
+def save_workflow_mapping(workflow_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    mappings = payload.get("mappings", [])
+    if not isinstance(mappings, list):
+        raise ValueError("mappings must be a list")
+    with db() as con:
+        get_workflow_or_fail(con, workflow_id)
+        con.execute("UPDATE workflow_input_mappings SET is_enabled = 0, updated_at = datetime('now') WHERE workflow_id = ?", (workflow_id,))
+        saved = []
+        for item in mappings:
+            field_key = item.get("field_key")
+            node_id = str(item.get("node_id") or "")
+            input_key = item.get("input_key")
+            if not field_key or not node_id or not input_key:
+                continue
+            mapping_id = item.get("mapping_id") or new_id("map")
+            con.execute(
+                """
+                INSERT INTO workflow_input_mappings
+                  (mapping_id, workflow_id, field_key, node_id, input_key, input_type, transform_json, is_enabled, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))
+                ON CONFLICT(workflow_id, field_key) DO UPDATE SET
+                  node_id = excluded.node_id,
+                  input_key = excluded.input_key,
+                  input_type = excluded.input_type,
+                  transform_json = excluded.transform_json,
+                  is_enabled = 1,
+                  updated_at = datetime('now')
+                """,
+                (
+                    mapping_id,
+                    workflow_id,
+                    field_key,
+                    node_id,
+                    input_key,
+                    item.get("input_type") or "text",
+                    json.dumps(item.get("transform_json") or {}, ensure_ascii=False),
+                ),
+            )
+            saved.append(field_key)
+        con.execute(
+            "INSERT INTO audit_logs (audit_id, action, entity_type, entity_id, detail_json) VALUES (?, 'save_mapping', 'workflow', ?, ?)",
+            (new_id("aud"), workflow_id, json.dumps({"fields": saved}, ensure_ascii=False)),
+        )
+    return {"ok": True, "workflow_id": workflow_id, "saved_fields": saved}
+
+
+def resolve_generation_output(con: sqlite3.Connection, job_id: str, content_scope: str) -> dict[str, Any]:
+    output_root = configured_comfy_output_root(con)
+    result: dict[str, Any] = {
+        "content_scope": content_scope,
+        "requested_storage_id": None,
+        "resolved_output_prefix": build_output_prefix(job_id, content_scope),
+        "validation_status": "ok",
+        "fallback_reason": None,
+        "comfy_output_root": str(output_root),
+    }
+    if content_scope != "adult_local":
+        return result
+
+    storage = row(
+        con,
+        """
+        SELECT * FROM storage_locations
+        WHERE content_scope = 'adult_local'
+          AND usage_type = 'generated'
+          AND is_enabled = 1
+        ORDER BY is_default DESC, updated_at DESC
+        LIMIT 1
+        """,
+    )
+    if not storage:
+        result.update(
+            {
+                "validation_status": "missing_storage",
+                "fallback_reason": "Adult Local storage location is not configured.",
+            }
+        )
+        return result
+
+    status = storage_status(storage, output_root)
+    result["requested_storage_id"] = storage["storage_id"]
+    if not status["path_exists"]:
+        result.update({"validation_status": "path_missing", "fallback_reason": "Adult Local storage path does not exist."})
+        return result
+    if not storage.get("is_available", 1):
+        result.update({"validation_status": "unavailable", "fallback_reason": "Adult Local storage location is unavailable."})
+        return result
+    if not storage.get("writable", 1):
+        result.update({"validation_status": "not_writable", "fallback_reason": "Adult Local storage location is not writable."})
+        return result
+    if not status.get("is_comfy_output_compatible"):
+        result.update(
+            {
+                "validation_status": "outside_comfy_output_root",
+                "fallback_reason": "Adult Local storage location is outside the ComfyUI output root.",
+            }
+        )
+        return result
+
+    relative_path = str(status.get("comfy_output_relative_path") or "").strip("/")
+    if not relative_path or relative_path.startswith("/") or ".." in relative_path.split("/"):
+        result.update(
+            {
+                "validation_status": "invalid_relative_prefix",
+                "fallback_reason": "Adult Local storage path could not be converted to a safe relative prefix.",
+            }
+        )
+        return result
+
+    result["resolved_output_prefix"] = build_output_prefix(job_id, content_scope, relative_path)
+    result["validation_status"] = "ok"
+    return result
+
+
+def create_generation_job(payload: dict[str, Any]) -> dict[str, Any]:
+    job_id = new_id("job")
+    content_scope = payload.get("mode") or payload.get("content_scope") or "sfw"
+    if content_scope not in CONTENT_SCOPES:
+        content_scope = "sfw"
+    output_prefix = build_output_prefix(job_id, content_scope)
+    workflow_id = payload.get("workflow_id")
+    prompt = payload.get("prompt", "")
+    negative = payload.get("negative_prompt", "")
+    parameters = {
+        "seed": payload.get("seed") or "random",
+        "width": payload.get("width") or 1024,
+        "height": payload.get("height") or 1024,
+        "batch_size": payload.get("batch_size") or 1,
+        "steps": payload.get("steps") or 20,
+        "cfg": payload.get("cfg") or 7,
+        "sampler": payload.get("sampler") or "",
+        "scheduler": payload.get("scheduler") or "",
+        "model": payload.get("model") or "",
+        "lora": payload.get("lora") or "",
+        "requested_filename_prefix": payload.get("filename_prefix") or "studio",
+        "filename_prefix": output_prefix,
+        "mode": content_scope,
+    }
+    status = "draft"
+    comfy_prompt_id = None
+    comfy_response: Any = None
+    error = None
+    prepared_payload: dict[str, Any] | None = None
+    submitted_at = None
+    requested_storage_id = None
+    output_scope_validation_status = "not_checked"
+
+    with db() as con:
+        workflow = None
+        if workflow_id:
+            workflow = con.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,)).fetchone()
+        output_resolution = resolve_generation_output(con, job_id, content_scope)
+        output_prefix = output_resolution["resolved_output_prefix"]
+        parameters["filename_prefix"] = output_prefix
+        parameters["resolved_output_prefix"] = output_prefix
+        parameters["output_scope_validation_status"] = output_resolution["validation_status"]
+        parameters["requested_storage_id"] = output_resolution["requested_storage_id"]
+        parameters["comfy_output_root"] = output_resolution["comfy_output_root"]
+        requested_storage_id = output_resolution["requested_storage_id"]
+        output_scope_validation_status = output_resolution["validation_status"]
+
+        if content_scope == "adult_local" and output_resolution["validation_status"] != "ok":
+            status = "simulation"
+            error = (
+                output_resolution["fallback_reason"]
+                + " ComfyUI submission was blocked to avoid mixing Adult Local outputs."
+            )
+        elif workflow:
+            mappings = rows(
+                con,
+                "SELECT * FROM workflow_input_mappings WHERE workflow_id = ? AND is_enabled = 1",
+                (workflow_id,),
+            )
+            missing = missing_required_mappings(mappings, negative)
+            if missing:
+                status = "simulation"
+                error = "Missing workflow mappings: " + ", ".join(missing)
+            else:
+                endpoint = get_setting(con, "comfy_endpoint", DEFAULT_COMFY)
+                workflow_json = read_workflow_json(workflow["relative_path"])
+                prepared_workflow, applied = apply_mappings(workflow_json, mappings, prompt, negative, parameters)
+                prepared_payload = {"prompt": prepared_workflow, "client_id": CLIENT_ID}
+                ok, response = post_json(f"{endpoint}/prompt", prepared_payload)
+                if ok:
+                    status = "submitted"
+                    comfy_prompt_id = response.get("prompt_id")
+                    comfy_response = response
+                    parameters["applied_mappings"] = applied
+                    submitted_at = now_iso()
+                else:
+                    status = "failed"
+                    error = str(response)
+        else:
+            status = "draft"
+            error = "No workflow selected. Job saved without ComfyUI submission."
+
+        con.execute(
+            """
+            INSERT INTO generation_jobs
+              (job_id, workflow_id, prompt, negative_prompt, parameters_json, status, comfy_prompt_id, comfy_response_json,
+               error_message, prepared_payload_json, output_prefix, output_prefix_source, submitted_at,
+               content_scope, requested_storage_id, resolved_output_prefix, output_scope_validation_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                workflow_id,
+                prompt,
+                negative,
+                json.dumps(parameters, ensure_ascii=False),
+                status,
+                comfy_prompt_id,
+                json.dumps(comfy_response, ensure_ascii=False) if comfy_response is not None else None,
+                error,
+                json.dumps(prepared_payload, ensure_ascii=False) if prepared_payload is not None else None,
+                output_prefix if workflow else None,
+                "scope_safe_output_mapping" if status == "submitted" else None,
+                submitted_at,
+                content_scope,
+                requested_storage_id,
+                output_prefix if workflow else None,
+                output_scope_validation_status,
+            ),
+        )
+        con.execute(
+            "INSERT INTO audit_logs (audit_id, action, entity_type, entity_id, detail_json) VALUES (?, 'create', 'generation_job', ?, ?)",
+            (
+                new_id("aud"),
+                job_id,
+                json.dumps(
+                    {
+                        "status": status,
+                        "scope": content_scope,
+                        "storage_id": requested_storage_id,
+                        "resolved_prefix": output_prefix,
+                        "validation_result": output_scope_validation_status,
+                        "fallback_reason": output_resolution.get("fallback_reason"),
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "status": status,
+        "comfy_prompt_id": comfy_prompt_id,
+        "error": error,
+        "content_scope": content_scope,
+        "resolved_output_prefix": output_prefix,
+        "output_scope_validation_status": output_scope_validation_status,
+    }
+
+
+def regenerate_job(job_id: str) -> dict[str, Any]:
+    with db() as con:
+        row = con.execute("SELECT * FROM generation_jobs WHERE job_id = ?", (job_id,)).fetchone()
+        if not row:
+            raise ValueError("job not found")
+        params = json.loads(row["parameters_json"])
+        payload = {
+            "workflow_id": row["workflow_id"],
+            "prompt": row["prompt"],
+            "negative_prompt": row["negative_prompt"],
+            **params,
+        }
+    return create_generation_job(payload)
+
+
+def poll_submitted_jobs() -> dict[str, Any]:
+    results = []
+    with db() as con:
+        job_ids = [
+            item["job_id"]
+            for item in rows(
+                con,
+                "SELECT job_id FROM generation_jobs WHERE status IN ('submitted', 'running') AND comfy_prompt_id IS NOT NULL ORDER BY created_at",
+            )
+        ]
+    for job_id in job_ids:
+        results.append(poll_job(job_id))
+    return {"ok": True, "polled": results}
+
+
+def poll_job(job_id: str) -> dict[str, Any]:
+    with db() as con:
+        job = row(con, "SELECT * FROM generation_jobs WHERE job_id = ?", (job_id,))
+        if not job:
+            raise ValueError("job not found")
+        if not job.get("comfy_prompt_id"):
+            return {"ok": True, "job_id": job_id, "status": job["status"], "message": "no comfy prompt id"}
+        endpoint = get_setting(con, "comfy_endpoint", DEFAULT_COMFY)
+    ok, history = request_json(f"{endpoint}/history/{job['comfy_prompt_id']}", timeout=3.0)
+    if not ok:
+        with db() as con:
+            con.execute(
+                "UPDATE generation_jobs SET status = 'running', error_message = ?, updated_at = datetime('now') WHERE job_id = ?",
+                (str(history), job_id),
+            )
+        return {"ok": False, "job_id": job_id, "status": "running", "error": str(history)}
+
+    prompt_history = history.get(job["comfy_prompt_id"]) if isinstance(history, dict) else None
+    if not prompt_history:
+        with db() as con:
+            con.execute("UPDATE generation_jobs SET status = 'running', updated_at = datetime('now') WHERE job_id = ?", (job_id,))
+        return {"ok": True, "job_id": job_id, "status": "running", "outputs": 0}
+
+    status_info = prompt_history.get("status", {}) if isinstance(prompt_history, dict) else {}
+    completed = status_info.get("completed", True)
+    if completed is False:
+        with db() as con:
+            con.execute("UPDATE generation_jobs SET status = 'running', updated_at = datetime('now') WHERE job_id = ?", (job_id,))
+        return {"ok": True, "job_id": job_id, "status": "running", "outputs": 0}
+
+    output_images = []
+    for output in (prompt_history.get("outputs") or {}).values():
+        for image in output.get("images", []) if isinstance(output, dict) else []:
+            output_images.append(image)
+
+    imported = import_job_outputs(job, output_images)
+    final_status = "completed" if imported or not output_images else "failed"
+    error = None if imported or not output_images else "ComfyUI history contained image outputs, but files were not found."
+    with db() as con:
+        con.execute(
+            """
+            UPDATE generation_jobs
+            SET status = ?, output_count = ?, completed_at = datetime('now'), error_message = ?, updated_at = datetime('now')
+            WHERE job_id = ?
+            """,
+            (final_status, len(imported), error, job_id),
+        )
+    return {"ok": True, "job_id": job_id, "status": final_status, "outputs": len(imported)}
+
+
+def import_job_outputs(job: dict[str, Any], output_images: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    imported = []
+    output_storage = ROOT / "output"
+    for image_info in output_images:
+        source = resolve_comfy_image(image_info)
+        if source.suffix.lower() not in IMAGE_EXTENSIONS or not source.exists():
+            continue
+        asset_id = new_id("asset")
+        output_id = new_id("out")
+        relative_path = relative_to_storage(source, output_storage)
+        width, height = image_dimensions(source)
+        thumb_storage_id, thumb_relative_path = make_thumbnail(source, asset_id)
+        with db() as con:
+            existing = row(
+                con,
+                """
+                SELECT go.output_id, go.asset_id
+                FROM generation_job_outputs go
+                WHERE go.job_id = ? AND go.source_path = ?
+                """,
+                (job["job_id"], str(source)),
+            )
+            if existing:
+                imported.append(existing)
+                continue
+            con.execute(
+                """
+                INSERT INTO media_assets
+                  (asset_id, storage_id, relative_path, thumbnail_storage_id, thumbnail_relative_path,
+                   media_type, sha256, status, source_job_id, safety_zone, content_scope)
+                VALUES (?, 'storage_default_output', ?, ?, ?, 'image', ?, 'candidate', ?, ?, ?)
+                """,
+                (
+                    asset_id,
+                    relative_path,
+                    thumb_storage_id,
+                    thumb_relative_path,
+                    file_sha256(source),
+                    job["job_id"],
+                    json.loads(job.get("parameters_json") or "{}").get("mode", "sfw"),
+                    json.loads(job.get("parameters_json") or "{}").get("mode", "sfw"),
+                ),
+            )
+            con.execute(
+                """
+                INSERT INTO generation_job_outputs
+                  (output_id, job_id, asset_id, source_path, file_name, media_type, width, height)
+                VALUES (?, ?, ?, ?, ?, 'image', ?, ?)
+                """,
+                (output_id, job["job_id"], asset_id, str(source), source.name, width, height),
+            )
+            con.execute(
+                "INSERT INTO audit_logs (audit_id, action, entity_type, entity_id, detail_json) VALUES (?, 'import_output', 'media_asset', ?, ?)",
+                (new_id("aud"), asset_id, json.dumps({"source_path": str(source), "job_id": job["job_id"]}, ensure_ascii=False)),
+            )
+        imported.append({"output_id": output_id, "asset_id": asset_id, "source_path": str(source)})
+    return imported
+
+
+def asset_thumbnail_path(asset_id: str) -> Path | None:
+    with db() as con:
+        asset = row(con, "SELECT * FROM media_assets WHERE asset_id = ?", (asset_id,))
+        if not asset:
+            return None
+        if asset.get("thumbnail_storage_id") and asset.get("thumbnail_relative_path"):
+            storage = row(con, "SELECT * FROM storage_locations WHERE storage_id = ?", (asset["thumbnail_storage_id"],))
+            if storage:
+                path = (Path(storage["base_path"]) / asset["thumbnail_relative_path"]).resolve()
+                if path.exists():
+                    return path
+    return asset_file_path(asset_id)
+
+
+def asset_file_path(asset_id: str) -> Path | None:
+    with db() as con:
+        asset = row(con, "SELECT * FROM media_assets WHERE asset_id = ?", (asset_id,))
+        if not asset:
+            return None
+        storage = row(con, "SELECT * FROM storage_locations WHERE storage_id = ?", (asset["storage_id"],))
+        if not storage:
+            return None
+        base = Path(storage["base_path"]).resolve()
+        path = (base / asset["relative_path"]).resolve()
+        if base not in path.parents and path != base:
+            return None
+        return path
+
+
+def get_asset_detail(asset_id: str) -> dict[str, Any]:
+    with db() as con:
+        asset = row(
+            con,
+            """
+            SELECT
+              ma.*,
+              go.source_path,
+              go.file_name,
+              go.width AS output_width,
+              go.height AS output_height,
+              gj.prompt,
+              gj.negative_prompt,
+              gj.parameters_json,
+              gj.output_prefix,
+              gj.created_at AS job_created_at,
+              gj.workflow_id,
+              wf.name AS workflow_name
+            FROM media_assets ma
+            LEFT JOIN generation_jobs gj ON gj.job_id = ma.source_job_id
+            LEFT JOIN generation_job_outputs go ON go.asset_id = ma.asset_id
+            LEFT JOIN workflows wf ON wf.workflow_id = gj.workflow_id
+            WHERE ma.asset_id = ?
+            """,
+            (asset_id,),
+        )
+        if not asset:
+            raise ValueError("asset not found")
+        asset["tags"] = asset_tags(con, asset_id)
+    return {"asset": asset}
+
+
+def sync_asset_tags(con: sqlite3.Connection, asset_id: str, tags: Any) -> list[str]:
+    normalized = normalize_tags(tags)
+    con.execute("DELETE FROM asset_tags WHERE asset_id = ?", (asset_id,))
+    for name in normalized:
+        tag_id = ensure_tag(con, name, "asset")
+        con.execute("INSERT OR IGNORE INTO asset_tags (asset_id, tag_id) VALUES (?, ?)", (asset_id, tag_id))
+    return normalized
+
+
+def update_asset(asset_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    allowed_status = {"draft", "candidate", "approved", "rejected", "archived"}
+    status = payload.get("status")
+    rating = payload.get("rating")
+    note = payload.get("note")
+    comparison_note = payload.get("comparison_note")
+    content_scope = payload.get("content_scope")
+    board_note = payload.get("board_note")
+    is_export_candidate = payload.get("is_export_candidate")
+    tags = payload.get("tags")
+    with db() as con:
+        if status:
+            if status not in allowed_status:
+                raise ValueError("invalid status")
+            con.execute("UPDATE media_assets SET status = ?, updated_at = datetime('now') WHERE asset_id = ?", (status, asset_id))
+        if rating is not None:
+            con.execute("UPDATE media_assets SET rating = ?, updated_at = datetime('now') WHERE asset_id = ?", (int(rating), asset_id))
+        if note is not None:
+            con.execute("UPDATE media_assets SET note = ?, updated_at = datetime('now') WHERE asset_id = ?", (str(note), asset_id))
+        if comparison_note is not None:
+            con.execute("UPDATE media_assets SET comparison_note = ?, updated_at = datetime('now') WHERE asset_id = ?", (str(comparison_note), asset_id))
+        if board_note is not None:
+            con.execute("UPDATE media_assets SET board_note = ?, updated_at = datetime('now') WHERE asset_id = ?", (str(board_note), asset_id))
+        if is_export_candidate is not None:
+            con.execute(
+                "UPDATE media_assets SET is_export_candidate = ?, updated_at = datetime('now') WHERE asset_id = ?",
+                (1 if is_export_candidate else 0, asset_id),
+            )
+        if content_scope is not None:
+            if content_scope not in CONTENT_SCOPES:
+                raise ValueError("invalid content scope")
+            con.execute(
+                "UPDATE media_assets SET content_scope = ?, safety_zone = ?, updated_at = datetime('now') WHERE asset_id = ?",
+                (content_scope, content_scope, asset_id),
+            )
+        saved_tags = None
+        if tags is not None:
+            saved_tags = sync_asset_tags(con, asset_id, tags)
+            con.execute("UPDATE media_assets SET updated_at = datetime('now') WHERE asset_id = ?", (asset_id,))
+        con.execute(
+            "INSERT INTO audit_logs (audit_id, action, entity_type, entity_id, detail_json) VALUES (?, 'update', 'media_asset', ?, ?)",
+            (new_id("aud"), asset_id, json.dumps(payload, ensure_ascii=False)),
+        )
+    return {"ok": True, "asset_id": asset_id, "tags": saved_tags}
+
+
+def create_comparison(payload: dict[str, Any]) -> dict[str, Any]:
+    asset_ids = [str(item) for item in payload.get("asset_ids", []) if str(item)]
+    asset_ids = list(dict.fromkeys(asset_ids))[:8]
+    if len(asset_ids) < 2:
+        raise ValueError("comparison requires at least two assets")
+    comparison_id = new_id("cmp")
+    name = str(payload.get("name") or f"Comparison {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    memo = str(payload.get("memo") or "")
+    selection_result = str(payload.get("selection_result") or "")
+    improvement_note = str(payload.get("improvement_note") or "")
+    with db() as con:
+        existing = {
+            item["asset_id"]
+            for item in rows(con, f"SELECT asset_id FROM media_assets WHERE asset_id IN ({','.join('?' for _ in asset_ids)})", tuple(asset_ids))
+        }
+        missing = [asset_id for asset_id in asset_ids if asset_id not in existing]
+        if missing:
+            raise ValueError("missing assets: " + ", ".join(missing))
+        con.execute(
+            """
+            INSERT INTO comparison_sets (comparison_id, name, memo, selection_result, improvement_note)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (comparison_id, name, memo, selection_result, improvement_note),
+        )
+        for index, asset_id in enumerate(asset_ids):
+            con.execute(
+                "INSERT INTO comparison_set_items (comparison_id, asset_id, position, sort_order) VALUES (?, ?, ?, ?)",
+                (comparison_id, asset_id, index, index),
+            )
+        con.execute(
+            "INSERT INTO audit_logs (audit_id, action, entity_type, entity_id, detail_json) VALUES (?, 'create', 'comparison_set', ?, ?)",
+            (new_id("aud"), comparison_id, json.dumps({"asset_ids": asset_ids}, ensure_ascii=False)),
+        )
+    return get_comparison(comparison_id)
+
+
+def get_comparison(comparison_id: str) -> dict[str, Any]:
+    with db() as con:
+        comparison = row(con, "SELECT * FROM comparison_sets WHERE comparison_id = ?", (comparison_id,))
+        if not comparison:
+            raise ValueError("comparison not found")
+        items = rows(
+            con,
+            asset_select_sql(
+                """
+                JOIN comparison_set_items csi ON csi.asset_id = ma.asset_id
+                WHERE csi.comparison_id = ?
+                """
+            ).replace("ORDER BY ma.created_at DESC", "ORDER BY csi.sort_order ASC, csi.position ASC"),
+            (comparison_id,),
+        )
+        hydrate_assets(con, items)
+    return {"ok": True, "comparison": comparison, "assets": items}
+
+
+def update_comparison(comparison_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    with db() as con:
+        existing = row(con, "SELECT * FROM comparison_sets WHERE comparison_id = ?", (comparison_id,))
+        if not existing:
+            raise ValueError("comparison not found")
+        fields = []
+        params: list[Any] = []
+        for key in ("name", "memo", "selection_result", "improvement_note", "status"):
+            if key in payload:
+                fields.append(f"{key} = ?")
+                params.append(str(payload[key]))
+        if fields:
+            params.append(comparison_id)
+            con.execute(
+                f"UPDATE comparison_sets SET {', '.join(fields)}, updated_at = datetime('now') WHERE comparison_id = ?",
+                tuple(params),
+            )
+    return get_comparison(comparison_id)
+
+
+def duplicate_comparison(comparison_id: str) -> dict[str, Any]:
+    detail = get_comparison(comparison_id)
+    comparison = detail["comparison"]
+    assets = detail["assets"]
+    if len(assets) < 2:
+        raise ValueError("comparison does not have enough available assets")
+    return create_comparison(
+        {
+            "asset_ids": [asset["asset_id"] for asset in assets],
+            "name": f"{comparison['name']} copy",
+            "memo": comparison.get("memo") or "",
+            "selection_result": comparison.get("selection_result") or "",
+            "improvement_note": comparison.get("improvement_note") or "",
+        }
+    )
+
+
+def recipe_payload_from_source(payload: dict[str, Any]) -> dict[str, Any]:
+    source_asset_id = payload.get("source_asset_id")
+    source_job_id = payload.get("source_job_id")
+    with db() as con:
+        asset = row(con, "SELECT * FROM media_assets WHERE asset_id = ?", (source_asset_id,)) if source_asset_id else None
+        job_id = source_job_id or (asset.get("source_job_id") if asset else None)
+        job = row(con, "SELECT * FROM generation_jobs WHERE job_id = ?", (job_id,)) if job_id else None
+        if not job:
+            raise ValueError("source job not found")
+        mappings = rows(con, "SELECT * FROM workflow_input_mappings WHERE workflow_id = ? AND is_enabled = 1 ORDER BY field_key", (job["workflow_id"],))
+        workflow = row(con, "SELECT * FROM workflows WHERE workflow_id = ?", (job["workflow_id"],)) if job.get("workflow_id") else None
+        params = json.loads(job.get("parameters_json") or "{}")
+        return {
+            "source_asset_id": source_asset_id,
+            "source_job_id": job_id,
+            "workflow_id": job.get("workflow_id"),
+            "workflow_version": workflow.get("version") if workflow else "v1",
+            "workflow_mapping_snapshot": mappings,
+            "positive_prompt": job.get("prompt") or "",
+            "negative_prompt": job.get("negative_prompt") or "",
+            "parameters_json": params,
+            "output_settings_json": {"output_prefix": job.get("output_prefix")},
+        }
+
+
+def sync_recipe_tags(con: sqlite3.Connection, recipe_id: str, tags: Any) -> list[str]:
+    normalized = normalize_tags(tags)
+    con.execute("DELETE FROM recipe_tags WHERE recipe_id = ?", (recipe_id,))
+    for name in normalized:
+        tag_id = ensure_tag(con, name, "recipe")
+        con.execute("INSERT OR IGNORE INTO recipe_tags (recipe_id, tag_id) VALUES (?, ?)", (recipe_id, tag_id))
+    return normalized
+
+
+def create_recipe(payload: dict[str, Any]) -> dict[str, Any]:
+    source = recipe_payload_from_source(payload)
+    recipe_id = new_id("recipe")
+    name = str(payload.get("name") or "Untitled Recipe").strip() or "Untitled Recipe"
+    description = str(payload.get("description") or "")
+    tags = payload.get("tags") or []
+    with db() as con:
+        con.execute(
+            """
+            INSERT INTO recipes
+              (recipe_id, name, description, source_asset_id, source_job_id, workflow_id, workflow_version,
+               workflow_mapping_snapshot, positive_prompt, negative_prompt, parameters_json, output_settings_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                recipe_id,
+                name,
+                description,
+                source["source_asset_id"],
+                source["source_job_id"],
+                source["workflow_id"],
+                source["workflow_version"],
+                json.dumps(source["workflow_mapping_snapshot"], ensure_ascii=False),
+                source["positive_prompt"],
+                source["negative_prompt"],
+                json.dumps(source["parameters_json"], ensure_ascii=False),
+                json.dumps(source["output_settings_json"], ensure_ascii=False),
+            ),
+        )
+        sync_recipe_tags(con, recipe_id, tags)
+        snapshot = row(con, "SELECT * FROM recipes WHERE recipe_id = ?", (recipe_id,))
+        con.execute(
+            "INSERT INTO recipe_versions (recipe_version_id, recipe_id, version, snapshot_json) VALUES (?, ?, 'v1', ?)",
+            (new_id("rv"), recipe_id, json.dumps(snapshot, ensure_ascii=False)),
+        )
+        con.execute(
+            "INSERT INTO audit_logs (audit_id, action, entity_type, entity_id, detail_json) VALUES (?, 'create', 'recipe', ?, ?)",
+            (new_id("aud"), recipe_id, json.dumps({"source_job_id": source["source_job_id"]}, ensure_ascii=False)),
+        )
+    return {"ok": True, "recipe_id": recipe_id}
+
+
+def get_recipe_detail(recipe_id: str) -> dict[str, Any]:
+    with db() as con:
+        recipe = row(
+            con,
+            """
+            SELECT
+              r.*,
+              wf.name AS workflow_name,
+              ma.relative_path AS source_relative_path,
+              go.file_name AS source_file_name
+            FROM recipes r
+            LEFT JOIN workflows wf ON wf.workflow_id = r.workflow_id
+            LEFT JOIN media_assets ma ON ma.asset_id = r.source_asset_id
+            LEFT JOIN generation_job_outputs go ON go.asset_id = r.source_asset_id
+            WHERE r.recipe_id = ?
+            """,
+            (recipe_id,),
+        )
+        if not recipe:
+            raise ValueError("recipe not found")
+        recipe["tags"] = recipe_tags(con, recipe_id)
+    return {"recipe": recipe}
+
+
+def update_recipe(recipe_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"active", "archived"}
+    if payload.get("save_mode") == "duplicate_version":
+        duplicate = duplicate_recipe(recipe_id, payload)
+        return {"ok": True, "recipe_id": duplicate["recipe_id"], "duplicated": True}
+    with db() as con:
+        current = row(con, "SELECT * FROM recipes WHERE recipe_id = ?", (recipe_id,))
+        if not current:
+            raise ValueError("recipe not found")
+        if "name" in payload:
+            con.execute("UPDATE recipes SET name = ?, updated_at = datetime('now') WHERE recipe_id = ?", (str(payload["name"]), recipe_id))
+        if "description" in payload:
+            con.execute("UPDATE recipes SET description = ?, updated_at = datetime('now') WHERE recipe_id = ?", (str(payload["description"]), recipe_id))
+        if "positive_prompt" in payload:
+            con.execute("UPDATE recipes SET positive_prompt = ?, updated_at = datetime('now') WHERE recipe_id = ?", (str(payload["positive_prompt"]), recipe_id))
+        if "negative_prompt" in payload:
+            con.execute("UPDATE recipes SET negative_prompt = ?, updated_at = datetime('now') WHERE recipe_id = ?", (str(payload["negative_prompt"]), recipe_id))
+        if "workflow_id" in payload:
+            workflow_id = str(payload.get("workflow_id") or "")
+            if workflow_id:
+                exists = row(con, "SELECT workflow_id FROM workflows WHERE workflow_id = ?", (workflow_id,))
+                if not exists:
+                    raise ValueError("workflow not found")
+            con.execute("UPDATE recipes SET workflow_id = ?, updated_at = datetime('now') WHERE recipe_id = ?", (workflow_id or None, recipe_id))
+        if "parameters" in payload:
+            params = payload["parameters"] if isinstance(payload["parameters"], dict) else {}
+            con.execute(
+                "UPDATE recipes SET parameters_json = ?, updated_at = datetime('now') WHERE recipe_id = ?",
+                (json.dumps(params, ensure_ascii=False), recipe_id),
+            )
+        if "status" in payload:
+            status = payload["status"]
+            if status not in allowed:
+                raise ValueError("invalid recipe status")
+            con.execute("UPDATE recipes SET status = ?, updated_at = datetime('now') WHERE recipe_id = ?", (status, recipe_id))
+        if "tags" in payload:
+            sync_recipe_tags(con, recipe_id, payload["tags"])
+            con.execute("UPDATE recipes SET updated_at = datetime('now') WHERE recipe_id = ?", (recipe_id,))
+        snapshot = row(con, "SELECT * FROM recipes WHERE recipe_id = ?", (recipe_id,))
+        con.execute(
+            "INSERT INTO recipe_versions (recipe_version_id, recipe_id, version, snapshot_json) VALUES (?, ?, ?, ?)",
+            (
+                new_id("rv"),
+                recipe_id,
+                str(payload.get("version") or snapshot.get("version") or "v1"),
+                json.dumps(snapshot, ensure_ascii=False),
+            ),
+        )
+    return {"ok": True, "recipe_id": recipe_id}
+
+
+def use_recipe(recipe_id: str) -> dict[str, Any]:
+    with db() as con:
+        recipe = row(con, "SELECT * FROM recipes WHERE recipe_id = ?", (recipe_id,))
+        if not recipe:
+            raise ValueError("recipe not found")
+        con.execute("UPDATE recipes SET use_count = use_count + 1, updated_at = datetime('now') WHERE recipe_id = ?", (recipe_id,))
+        recipe = row(con, "SELECT * FROM recipes WHERE recipe_id = ?", (recipe_id,))
+        recipe["tags"] = recipe_tags(con, recipe_id)
+    return {"ok": True, "recipe": recipe}
+
+
+def duplicate_recipe(recipe_id: str, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+    detail = get_recipe_detail(recipe_id)["recipe"]
+    overrides = overrides or {}
+    new_id_value = new_id("recipe")
+    params = overrides.get("parameters") if isinstance(overrides.get("parameters"), dict) else json.loads(detail.get("parameters_json") or "{}")
+    next_version = str(overrides.get("version") or f"{detail.get('version') or 'v1'} copy")
+    with db() as con:
+        con.execute(
+            """
+            INSERT INTO recipes
+              (recipe_id, name, description, source_asset_id, source_job_id, workflow_id, workflow_version,
+               workflow_mapping_snapshot, positive_prompt, negative_prompt, parameters_json, output_settings_json,
+               status, version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+            """,
+            (
+                new_id_value,
+                str(overrides.get("name") or f"{detail['name']} copy"),
+                str(overrides.get("description") if "description" in overrides else detail["description"]),
+                detail["source_asset_id"],
+                detail["source_job_id"],
+                overrides.get("workflow_id") if "workflow_id" in overrides else detail["workflow_id"],
+                detail["workflow_version"],
+                detail["workflow_mapping_snapshot"],
+                str(overrides.get("positive_prompt") if "positive_prompt" in overrides else detail["positive_prompt"]),
+                str(overrides.get("negative_prompt") if "negative_prompt" in overrides else detail["negative_prompt"]),
+                json.dumps(params, ensure_ascii=False),
+                detail["output_settings_json"],
+                next_version,
+            ),
+        )
+        sync_recipe_tags(con, new_id_value, overrides.get("tags") if "tags" in overrides else detail.get("tags", []))
+        snapshot = row(con, "SELECT * FROM recipes WHERE recipe_id = ?", (new_id_value,))
+        con.execute(
+            "INSERT INTO recipe_versions (recipe_version_id, recipe_id, version, snapshot_json) VALUES (?, ?, ?, ?)",
+            (new_id("rv"), new_id_value, next_version, json.dumps(snapshot, ensure_ascii=False)),
+        )
+    return {"ok": True, "recipe_id": new_id_value}
+
+
+def save_panel_state(payload: dict[str, Any]) -> dict[str, Any]:
+    with db() as con:
+        set_setting(con, "panel_state", payload)
+    return {"ok": True}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="AI Media Factory Studio local server")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", default=8765, type=int)
+    parser.add_argument("--init-only", action="store_true")
+    args = parser.parse_args()
+    run_migrations()
+    if args.init_only:
+        print(f"initialized {DB_PATH}")
+        return 0
+    os.chdir(STATIC)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"AI Media Factory Studio v{APP_VERSION}: http://{args.host}:{args.port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

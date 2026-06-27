@@ -1,0 +1,6 @@
+{
+  "comfy_endpoint": "http://127.0.0.1:8188",
+  "ollama_endpoint": "http://127.0.0.1:11434",
+  "comfy_output_root": "D:\\Example\\AI-Media-Factory\\output\\draft",
+  "adult_local_storage_note": "Set Adult Local storage to a directory under comfy_output_root, for example D:\\Example\\AI-Media-Factory\\output\\draft\\adult_local."
+}

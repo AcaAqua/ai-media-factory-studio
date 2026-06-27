@@ -1,0 +1,137 @@
+# AI Media Factory Studio
+
+Designed & developed by LuckyFields LLC
+
+AI Media Factory Studio is a local-first creative control center for ComfyUI and Ollama environments. It helps manage workflows, prompts, recipes, generated assets, storage locations, generation history, comparison sets, and local production operations.
+
+## License
+
+AI Media Factory Studio is licensed under the Apache License, Version 2.0. See `LICENSE` and `NOTICE`.
+
+Copyright 2026 LuckyFields LLC.
+
+## What This Project Does
+
+- Provides a local web UI for Studio-managed generation operations.
+- Sends copied, mapped workflow payloads to an existing ComfyUI `/prompt` endpoint.
+- Checks local Ollama connectivity for prompt-assist workflows.
+- Stores local workflow mappings, prompts, recipes, generated asset records, comparison sets, and production board metadata.
+- Tracks content scopes such as `general`, `sensitive`, and `adult_local` for local organization and storage separation.
+- Uses scope-safe output prefixes for ComfyUI submissions when mappings are configured.
+
+## What This Project Does Not Include
+
+This repository does not include ComfyUI, Ollama, model files, LoRA files, VAE files, ControlNet files, generated images, generated videos, personal databases, API keys, or private settings.
+
+Users install and manage third-party tools, models, custom nodes, and workflows separately.
+
+## Local-First Data Handling
+
+Generated assets, prompts, recipes, thumbnails, and database records are designed to remain local unless the user explicitly connects external services or exports data.
+
+Local/private data excluded from the public repository includes:
+
+- SQLite databases
+- backups
+- thumbnails
+- generated images and videos
+- reference assets
+- model and LoRA folders
+- API keys, tokens, secrets, and local config
+
+## Third-Party Software and Model Notice
+
+ComfyUI, Ollama, custom nodes, model files, LoRA files, workflows, and external services may have independent licenses, terms of service, and content restrictions.
+
+Users are responsible for reviewing and complying with the terms that apply to each component they install, import, connect, or use.
+
+## Generated Content and Rights Notice
+
+Generated outputs may be subject to third-party rights, model license conditions, platform terms, or local laws.
+
+AI Media Factory Studio does not determine ownership, copyright status, commercial usability, legal compliance, or platform compliance of imported or generated assets.
+
+This project is not legal advice and does not replace copyright, licensing, or terms-of-service review.
+
+## Adult Local / Content Scope Notice
+
+The application supports local content scopes such as `general`, `sensitive`, and `adult_local` for organizational and storage separation.
+
+These scopes are user-managed labels and storage controls. They do not constitute legal classification, legal advice, age verification, or automated content compliance determination.
+
+Adult Local output submission is blocked unless the configured storage can be safely represented as a relative ComfyUI output prefix under the configured ComfyUI output root.
+
+## Security and Privacy
+
+The application is designed for local-first use. Review firewall rules and network exposure before binding Studio or ComfyUI to non-localhost addresses.
+
+Do not commit or publish local DB files, generated media, reference assets, model files, LoRA files, personal prompts, API keys, tokens, `.env` files, or private configuration.
+
+See `SECURITY.md` and `docs/privacy-and-local-data.md`.
+
+## Requirements
+
+- Windows with PowerShell
+- Python 3.10+
+- A separately installed ComfyUI instance
+- Optional: Ollama for local prompt assistance
+
+## Start
+
+```powershell
+python studio\server.py
+```
+
+Open:
+
+```text
+http://127.0.0.1:8765/
+```
+
+If you use the provided script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start_studio.ps1
+```
+
+## First Setup
+
+1. Start ComfyUI separately.
+2. Open Studio.
+3. Confirm ComfyUI and Ollama connection status in Settings.
+4. Register or scan workflows.
+5. Open Workflow input mapping and save mappings before real generation.
+6. Configure Adult Local storage only if the directory is inside the ComfyUI output root.
+
+## Public Repository Boundary
+
+Intended public source:
+
+- `studio/server.py`
+- `studio/static/`
+- `studio/data/migrations/`
+- `scripts/start_studio.ps1`
+- `docs/`
+- `config/studio.example.json`
+- `sample-workflows/`
+- project metadata such as README, changelog, license, notice, security notes, and contribution notes
+
+Excluded local/private data:
+
+- SQLite DB files
+- backups
+- thumbnails
+- generated images and references
+- models, LoRA, checkpoints, VAE, ControlNet, upscale models
+- API keys, tokens, secrets, and local config
+
+## Support and Issue Reporting
+
+Public issue reporting should be enabled only after the first public repository setup is complete and private local data has been excluded. When reporting issues, do not attach databases, generated images, private prompts, API keys, model files, or client materials.
+
+## Known Constraints
+
+- Git history for this local folder is currently not recoverable from the empty `.git` directory alone.
+- Git initialization, remote setup, commit, and push are intentionally not part of the current repository preparation step.
+- Video import is reserved for a future version.
+- This project controls Studio only; it does not redistribute ComfyUI, models, custom nodes, or third-party checkpoints.

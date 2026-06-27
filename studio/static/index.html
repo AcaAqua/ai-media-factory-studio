@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Media Factory Studio</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <nav class="side-nav" aria-label="Main">
+        <div class="brand">
+          <span class="brand-mark">LF</span>
+          <span>
+            <strong>AI Media</strong>
+            <small>Factory Studio</small>
+          </span>
+        </div>
+        <button class="nav-item active" data-view="generate" title="生成">
+          <svg viewBox="0 0 24 24"><path d="M12 3l2.2 5.4L20 10.6l-5.8 2.1L12 18l-2.2-5.3L4 10.6l5.8-2.2L12 3z"/></svg>
+          <span>生成</span>
+        </button>
+        <button class="nav-item" data-view="library" title="資産">
+          <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM7 8h4v4H7zM13 8h4v2h-4zM13 12h4v4h-4zM7 14h4v2H7z"/></svg>
+          <span>資産</span>
+        </button>
+        <button class="nav-item" data-view="board" title="制作ボード">
+          <svg viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>
+          <span>制作ボード</span>
+        </button>
+        <button class="nav-item" data-view="recipes" title="レシピ">
+          <svg viewBox="0 0 24 24"><path d="M6 4h12v16H6zM8 7h8v2H8zM8 11h8v2H8zM8 15h5v2H8z"/></svg>
+          <span>レシピ</span>
+        </button>
+        <button class="nav-item" data-view="models" title="モデル">
+          <svg viewBox="0 0 24 24"><path d="M12 3l8 4v10l-8 4-8-4V7l8-4zm0 2.4L6.5 8.1 12 11l5.5-2.9L12 5.4zM6 9.8v5.9l5 2.5v-5.8L6 9.8zm12 0-5 2.6v5.8l5-2.5V9.8z"/></svg>
+          <span>モデル</span>
+        </button>
+        <button class="nav-item" data-view="updates" title="更新">
+          <svg viewBox="0 0 24 24"><path d="M17.7 6.3A8 8 0 1 0 20 12h-2a6 6 0 1 1-1.8-4.2L13 11h8V3l-3.3 3.3z"/></svg>
+          <span>更新</span>
+        </button>
+        <button class="nav-item" data-view="settings" title="設定">
+          <svg viewBox="0 0 24 24"><path d="M19.4 13.5a7.7 7.7 0 0 0 0-3l2-1.5-2-3.4-2.4 1a8 8 0 0 0-2.6-1.5L14 2h-4l-.4 3.1A8 8 0 0 0 7 6.6l-2.4-1-2 3.4 2 1.5a7.7 7.7 0 0 0 0 3l-2 1.5 2 3.4 2.4-1a8 8 0 0 0 2.6 1.5L10 22h4l.4-3.1a8 8 0 0 0 2.6-1.5l2.4 1 2-3.4-2-1.5zM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5z"/></svg>
+          <span>設定</span>
+        </button>
+      </nav>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <h1>生成</h1>
+            <p>ComfyUI Workflowを登録し、Promptと履歴をStudio側に残します。</p>
+          </div>
+          <div class="status-strip" id="statusStrip"></div>
+        </header>
+
+        <section class="view active" id="view-generate">
+          <form class="generate-grid" id="generateForm">
+            <section class="surface prompt-surface">
+              <div class="section-head">
+                <h2>Prompt</h2>
+                <div class="mode-switch" role="group" aria-label="mode">
+                  <label><input type="radio" name="mode" value="sfw" checked /> SFW</label>
+                  <label><input type="radio" name="mode" value="sensitive" /> Sensitive</label>
+                  <label><input type="radio" name="mode" value="adult_local" /> Adult Local</label>
+                </div>
+              </div>
+              <label class="field">
+                <span>Workflow</span>
+                <select id="workflowSelect"></select>
+              </label>
+              <label class="field">
+                <span>レシピ</span>
+                <select id="recipeSelect"></select>
+              </label>
+              <label class="field">
+                <span>Prompt</span>
+                <textarea name="prompt" rows="7" placeholder="例: cinematic portrait, soft light, detailed costume"></textarea>
+              </label>
+              <label class="field">
+                <span>Negative</span>
+                <textarea name="negative_prompt" rows="4" placeholder="low quality, bad anatomy, text, watermark"></textarea>
+              </label>
+              <div class="control-row">
+                <label class="field compact"><span>Seed</span><input name="seed" value="random" /></label>
+                <label class="field compact"><span>幅</span><input name="width" type="number" value="1024" /></label>
+                <label class="field compact"><span>高さ</span><input name="height" type="number" value="1024" /></label>
+                <label class="field compact"><span>枚数</span><input name="batch_size" type="number" value="1" min="1" max="8" /></label>
+              </div>
+              <div class="control-row">
+                <label class="field compact"><span>Steps</span><input name="steps" type="number" value="20" /></label>
+                <label class="field compact"><span>CFG</span><input name="cfg" type="number" step="0.1" value="7" /></label>
+                <label class="field compact"><span>Sampler</span><input name="sampler" placeholder="任意" /></label>
+                <label class="field compact"><span>Scheduler</span><input name="scheduler" placeholder="任意" /></label>
+              </div>
+              <div class="control-row">
+                <label class="field compact"><span>モデル</span><input name="model" placeholder="任意" /></label>
+                <label class="field compact"><span>LoRA</span><input name="lora" placeholder="任意" /></label>
+                <label class="field compact wide-field"><span>出力prefix</span><input name="filename_prefix" value="studio" /></label>
+              </div>
+              <p class="scope-status" id="scopeStatus">Scope: 通常 / 出力prefixはComfyUI出力ルート配下に作成します。</p>
+              <p class="note" id="adultLocalNotice" hidden>Adult Localは専用保存先に分離して管理します。公開・共有前の確認は利用者が行ってください。</p>
+              <p class="scope-warning" id="scopeWarning" hidden>Adult Local保存先が未設定、またはComfyUI出力ルート外です。混在防止のため、この区分ではComfyUI送信をブロックします。</p>
+              <div class="action-row">
+                <button class="primary" type="submit">生成</button>
+                <button class="secondary" type="button" id="ollamaDraft">Ollama相談</button>
+                <button class="secondary" type="button" id="saveRecipe">レシピ保存</button>
+              </div>
+              <p class="note">Workflow原本は変更せず、実行用コピーへ保存済みマッピングとジョブ別出力prefixを反映してComfyUIへ送信します。</p>
+            </section>
+
+            <aside class="surface queue-surface">
+              <div class="section-head">
+                <h2>Queue / 履歴</h2>
+                <button class="icon-button" type="button" id="refreshButton" title="更新">
+                  <svg viewBox="0 0 24 24"><path d="M17.7 6.3A8 8 0 1 0 20 12h-2a6 6 0 1 1-1.8-4.2L13 11h8V3l-3.3 3.3z"/></svg>
+                </button>
+              </div>
+              <div class="job-list" id="jobList"></div>
+            </aside>
+          </form>
+        </section>
+
+        <section class="view" id="view-library">
+          <div class="surface">
+            <div class="section-head">
+              <h2>画像・動画ライブラリ</h2>
+              <button class="icon-button" type="button" id="toggleLibraryFilters" title="フィルター">
+                <svg viewBox="0 0 24 24"><path d="M4 5h16l-6 7v6l-4 2v-8z"/></svg>
+              </button>
+            </div>
+            <div class="scope-tabs" id="scopeTabs">
+              <button class="filter active" type="button" data-scope-tab="sfw">通常</button>
+              <button class="filter" type="button" data-scope-tab="sensitive">Sensitive</button>
+              <button class="filter" type="button" data-scope-tab="adult_local">Adult Local</button>
+            </div>
+            <div class="library-search">
+              <input id="assetSearch" placeholder="検索キーワード" />
+              <div class="quick-filters">
+                <button class="filter" type="button" data-quick-filter="approved">採用済み</button>
+                <button class="filter" type="button" data-quick-filter="candidate">候補だけ</button>
+                <button class="filter" type="button" data-quick-filter="not_rejected">不採用を除く</button>
+                <button class="filter" type="button" data-quick-filter="recent">最近生成</button>
+              </div>
+            </div>
+            <div class="library-filters" id="libraryFilters" hidden>
+              <label class="field compact"><span>状態</span><select id="filterStatus"></select></label>
+              <label class="field compact"><span>評価</span><select id="filterRating"></select></label>
+              <label class="field compact"><span>タグ</span><select id="filterTags" multiple></select></label>
+              <label class="field compact"><span>Workflow</span><select id="filterWorkflow"></select></label>
+              <label class="field compact"><span>Recipe</span><select id="filterRecipe"></select></label>
+              <label class="field compact"><span>期間</span><select id="filterPeriod"></select></label>
+              <label class="field compact"><span>区分</span><select id="filterScope"></select></label>
+              <button class="secondary" type="button" id="clearLibraryFilters">絞り込み解除</button>
+            </div>
+            <div class="compare-bar">
+              <span id="compareCount">0件選択</span>
+              <button class="secondary" type="button" id="openCompare" disabled>比較</button>
+            </div>
+            <details class="comparison-list-wrap">
+              <summary>比較セット</summary>
+              <div class="comparison-list" id="comparisonList"></div>
+            </details>
+            <div class="asset-grid" id="assetGrid"></div>
+          </div>
+        </section>
+
+        <section class="view" id="view-board">
+          <div class="surface">
+            <div class="section-head"><h2>制作ボード</h2></div>
+            <div class="library-filters board-filters">
+              <label class="field compact"><span>タグ</span><select id="boardFilterTags" multiple></select></label>
+              <label class="field compact"><span>Workflow</span><select id="boardFilterWorkflow"></select></label>
+              <label class="field compact"><span>Recipe</span><select id="boardFilterRecipe"></select></label>
+              <label class="field compact"><span>区分</span><select id="boardFilterScope"></select></label>
+              <label class="field compact"><span>評価</span><select id="boardFilterRating"></select></label>
+              <button class="secondary" type="button" id="clearBoardFilters">絞り込み解除</button>
+            </div>
+            <div class="asset-grid" id="boardGrid"></div>
+          </div>
+        </section>
+
+        <section class="view" id="view-recipes">
+          <div class="surface">
+            <div class="section-head"><h2>レシピ</h2></div>
+            <div class="recipe-list" id="recipeList"></div>
+          </div>
+        </section>
+
+        <section class="view" id="view-models">
+          <div class="surface">
+            <div class="section-head"><h2>モデル状態</h2></div>
+            <div id="modelList" class="model-list"></div>
+          </div>
+        </section>
+
+        <section class="view" id="view-updates">
+          <div class="surface">
+            <div class="section-head"><h2>更新センター</h2></div>
+            <div class="empty-state">自動更新は既定OFFです。初期版では接続確認とGit状態表示だけを行います。外部サービス・モデル・Workflowの利用条件は配布元で確認してください。</div>
+          </div>
+        </section>
+
+        <section class="view" id="view-settings">
+          <div class="surface settings-grid">
+            <div>
+              <h2>接続</h2>
+              <dl class="info-list" id="connectionDetails"></dl>
+            </div>
+            <div>
+              <div class="section-head">
+                <h2>保存先</h2>
+                <button class="secondary" type="button" id="openStorageDialog">＋ 保存先追加</button>
+              </div>
+              <div class="storage-list" id="storageList"></div>
+            </div>
+            <div>
+              <h2>About</h2>
+              <dl class="info-list">
+                <dt>Product</dt><dd>AI Media Factory Studio</dd>
+                <dt>Version</dt><dd>v0.1.6</dd>
+                <dt>Brand</dt><dd>Designed & developed by LuckyFields LLC</dd>
+                <dt>License</dt><dd>Apache License 2.0</dd>
+                <dt>Notice</dt><dd>Local-first tool for ComfyUI &amp; Ollama. Third-party models and assets are managed by the user.</dd>
+              </dl>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <aside class="right-panels" id="rightPanels">
+        <section class="dock-panel" data-panel="ollama">
+          <header><h2>Ollama</h2><button class="panel-toggle" title="最小化">_</button></header>
+          <div class="panel-body">
+            <button class="panel-action">Promptを整える</button>
+            <button class="panel-action">3案出す</button>
+            <button class="panel-action">ネガティブ補強</button>
+            <button class="panel-action">画像を分析してレシピ化</button>
+          </div>
+        </section>
+        <section class="dock-panel" data-panel="details">
+          <header><h2>詳細設定</h2><button class="panel-toggle" title="最小化">_</button></header>
+          <div class="panel-body">
+            <details open>
+              <summary>Workflow入力マッピング</summary>
+              <div class="mapping-actions">
+                <button class="panel-action" type="button" id="detectMapping">自動候補を検出</button>
+                <button class="panel-action" type="button" id="saveMapping">保存</button>
+                <button class="panel-action" type="button" id="testMappingSend">テスト送信</button>
+              </div>
+              <div class="mapping-table" id="mappingTable"></div>
+              <p class="note" id="mappingStatus">Workflowを選択してください。</p>
+            </details>
+            <details><summary>出力設定</summary><p>既存ComfyUI出力を移動せず、参照登録します。</p></details>
+            <details><summary>Workflow詳細</summary><p>原本JSONは上書きしません。</p></details>
+          </div>
+        </section>
+      </aside>
+
+      <aside class="detail-drawer" id="assetDetail" aria-hidden="true">
+        <header>
+          <h2>画像詳細</h2>
+          <button class="panel-toggle" type="button" id="closeAssetDetail" title="閉じる">×</button>
+        </header>
+        <div class="detail-body">
+          <img id="detailImage" alt="">
+          <div class="detail-grid">
+            <label class="field"><span>状態</span><select id="detailStatus">
+              <option value="draft">草案</option>
+              <option value="candidate">候補</option>
+              <option value="approved">採用</option>
+              <option value="rejected">不採用</option>
+              <option value="archived">保管</option>
+            </select></label>
+            <label class="field"><span>評価</span><input id="detailRating" type="number" min="0" max="5" value="0"></label>
+            <label class="field"><span>区分</span><select id="detailScope">
+              <option value="sfw">SFW</option>
+              <option value="sensitive">Sensitive</option>
+              <option value="adult_local">Adult Local</option>
+            </select></label>
+          </div>
+          <label class="field"><span>タグ</span><input id="detailTags" placeholder="game character night-city"></label>
+          <label class="field"><span>メモ</span><textarea id="detailNote" rows="3"></textarea></label>
+          <label class="field"><span>比較メモ</span><textarea id="detailCompareNote" rows="2"></textarea></label>
+          <dl class="info-list detail-info" id="detailInfo"></dl>
+          <details><summary>Prompt</summary><p id="detailPrompt"></p></details>
+          <details><summary>Negative</summary><p id="detailNegative"></p></details>
+          <div class="action-row">
+            <button class="primary" type="button" id="saveAssetDetail">保存</button>
+            <button class="secondary" type="button" id="detailRegenerate">同条件で再生成</button>
+            <button class="secondary" type="button" id="detailSaveRecipe">レシピとして保存</button>
+            <a class="secondary link-button" id="detailOpenImage" target="_blank" rel="noreferrer">画像を開く</a>
+          </div>
+        </div>
+      </aside>
+
+      <aside class="detail-drawer compare-drawer" id="compareView" aria-hidden="true">
+        <header>
+          <h2>画像比較</h2>
+          <button class="panel-toggle" type="button" id="closeCompare" title="閉じる">×</button>
+        </header>
+        <div class="compare-meta">
+          <label class="field"><span>比較セット名</span><input id="compareName"></label>
+          <label class="field"><span>比較メモ</span><textarea id="compareMemo" rows="2"></textarea></label>
+          <label class="field"><span>選定結果</span><input id="compareResult"></label>
+          <label class="field"><span>次回改善メモ</span><textarea id="compareImprove" rows="2"></textarea></label>
+          <button class="primary" type="button" id="saveCompare">比較セット保存</button>
+        </div>
+        <div class="compare-grid" id="compareGrid"></div>
+      </aside>
+
+      <aside class="detail-drawer" id="recipeDetail" aria-hidden="true">
+        <header>
+          <h2>レシピ詳細</h2>
+          <button class="panel-toggle" type="button" id="closeRecipeDetail" title="閉じる">×</button>
+        </header>
+        <div class="detail-body">
+          <label class="field"><span>Recipe Name</span><input id="editRecipeName"></label>
+          <label class="field"><span>Prompt</span><textarea id="editRecipePrompt" rows="5"></textarea></label>
+          <label class="field"><span>Negative</span><textarea id="editRecipeNegative" rows="3"></textarea></label>
+          <label class="field"><span>Workflow</span><select id="editRecipeWorkflow"></select></label>
+          <div class="control-row">
+            <label class="field compact"><span>Seed</span><input id="editRecipeSeed"></label>
+            <label class="field compact"><span>幅</span><input id="editRecipeWidth" type="number"></label>
+            <label class="field compact"><span>高さ</span><input id="editRecipeHeight" type="number"></label>
+            <label class="field compact"><span>Steps</span><input id="editRecipeSteps" type="number"></label>
+            <label class="field compact"><span>CFG</span><input id="editRecipeCfg" type="number" step="0.1"></label>
+          </div>
+          <label class="field"><span>Tags</span><input id="editRecipeTags"></label>
+          <label class="field"><span>Description</span><textarea id="editRecipeDescription" rows="3"></textarea></label>
+          <dl class="info-list" id="editRecipeInfo"></dl>
+          <div class="action-row">
+            <button class="primary" type="button" id="saveRecipeOverwrite">上書き保存</button>
+            <button class="secondary" type="button" id="saveRecipeVersion">複製して新バージョン</button>
+            <button class="secondary" type="button" id="applyRecipeDetail">生成画面へ反映</button>
+            <button class="secondary" type="button" id="archiveRecipeDetail">アーカイブ</button>
+          </div>
+        </div>
+      </aside>
+
+      <dialog class="recipe-dialog" id="recipeDialog">
+        <form method="dialog" id="recipeForm">
+          <h2>レシピとして保存</h2>
+          <label class="field"><span>レシピ名</span><input id="recipeName" required></label>
+          <label class="field"><span>説明</span><textarea id="recipeDescription" rows="3"></textarea></label>
+          <label class="field"><span>タグ</span><input id="recipeTags" placeholder="game character night-city"></label>
+          <dl class="info-list" id="recipeSourceInfo"></dl>
+          <div class="action-row">
+            <button class="primary" value="save" type="submit">保存</button>
+            <button class="secondary" value="cancel" type="button" id="cancelRecipeDialog">キャンセル</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog class="recipe-dialog" id="recipeApplyDialog">
+        <form method="dialog" id="recipeApplyForm">
+          <h2>レシピを反映</h2>
+          <p class="note" id="recipeApplyName"></p>
+          <div class="apply-options">
+            <label><input type="checkbox" name="apply_prompt" checked> Prompt</label>
+            <label><input type="checkbox" name="apply_negative" checked> Negative</label>
+            <label><input type="checkbox" name="apply_workflow" checked> Workflow</label>
+            <label><input type="checkbox" name="apply_seed" checked> Seed</label>
+            <label><input type="checkbox" name="apply_size" checked> 解像度</label>
+            <label><input type="checkbox" name="apply_settings" checked> 詳細設定</label>
+          </div>
+          <p class="scope-warning" id="recipeApplyWarning">現在の入力を上書きする可能性があります。</p>
+          <div class="action-row">
+            <button class="primary" type="button" id="applyRecipeAll">すべて置き換える</button>
+            <button class="secondary" type="button" id="applyRecipeSelected">選択項目だけ反映</button>
+            <button class="secondary" type="button" id="applyRecipeDraft">現在の内容を保存してから反映</button>
+            <button class="secondary" type="button" id="cancelRecipeApply">キャンセル</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog class="recipe-dialog" id="storageDialog">
+        <form method="dialog" id="storageForm">
+          <h2>保存先</h2>
+          <input type="hidden" id="storageId">
+          <label class="field"><span>名前</span><input id="storageName" required></label>
+          <label class="field"><span>ベースパス</span><input id="storageBasePath" required></label>
+          <div class="detail-grid">
+            <label class="field"><span>区分</span><select id="storageScope">
+              <option value="general">general</option>
+              <option value="sensitive">sensitive</option>
+              <option value="adult_local">adult_local</option>
+            </select></label>
+            <label class="field"><span>用途</span><select id="storageUsage">
+              <option value="generated">generated</option>
+              <option value="references">references</option>
+              <option value="exports">exports</option>
+              <option value="thumbnails">thumbnails</option>
+              <option value="backups">backups</option>
+            </select></label>
+          </div>
+          <label class="field"><span>状態</span><select id="storageEnabled">
+            <option value="1">有効</option>
+            <option value="0">無効</option>
+          </select></label>
+          <label class="field"><span><input id="storageDefault" type="checkbox"> 既定保存先</span></label>
+          <p class="note" id="storageTestResult"></p>
+          <div class="action-row">
+            <button class="secondary" type="button" id="testStoragePath">書き込みテスト</button>
+            <button class="primary" type="submit">保存</button>
+            <button class="secondary" type="button" id="cancelStorageDialog">キャンセル</button>
+          </div>
+        </form>
+      </dialog>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

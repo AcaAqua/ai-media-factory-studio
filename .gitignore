@@ -1,0 +1,75 @@
+# Local databases and backups
+studio/data/media_factory.sqlite3
+studio/data/backups/
+studio/thumbnails/
+studio/logs/
+*.sqlite3
+*.db
+backups/
+logs/
+.agents/
+.codex/
+
+# Generated media and private assets
+output/
+outputs/
+references/
+storage/
+exports/
+input/
+assets/
+
+# Models and local AI runtimes
+models/
+loras/
+checkpoints/
+vae/
+controlnet/
+upscale_models/
+llm/models/
+llm/
+ComfyUI/
+configs/
+shortcuts/
+custom_nodes/**/.venv/
+workflows/
+
+# Local operational history and non-public docs
+docs/*
+!docs/
+!docs/README.md
+!docs/architecture.md
+!docs/setup-guide.md
+!docs/privacy-and-local-data.md
+!docs/release-process.md
+!docs/public-repository-checklist.md
+!docs/license-decision.md
+!docs/third-party-notices.md
+!docs/content-and-asset-responsibility.md
+!docs/adult-local-scope.md
+docs/作業履歴.md
+
+# Local operational scripts
+scripts/*
+!scripts/
+!scripts/start_studio.ps1
+
+# Secrets and local-only config
+.env
+.env.*
+*.token
+*.key
+*.secret
+config/studio.local.json
+config/*.local.*
+configs/**/*.db
+configs/**/*.sqlite*
+
+# Python / Node / OS noise
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
+Thumbs.db
+
+# Keep public source, docs, migrations, examples, sample workflows, LICENSE, and NOTICE tracked.

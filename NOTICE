@@ -1,0 +1,21 @@
+AI Media Factory Studio
+Copyright 2026 LuckyFields LLC
+
+AI Media Factory Studio is licensed under the Apache License, Version 2.0.
+
+AI Media Factory Studio is a local-first control and management tool for
+ComfyUI and Ollama environments. It can connect to or work with third-party
+software, models, workflows, APIs, and assets that may be subject to their
+own licenses, terms, policies, and usage restrictions.
+
+ComfyUI, Ollama, model files, LoRA files, VAE files, ControlNet files,
+upscalers, custom nodes, external workflows, prompt packs, and generated
+assets are not bundled unless explicitly stated.
+
+Users are responsible for confirming the applicable rights, licenses, terms,
+and usage conditions for all third-party materials they install, import,
+connect, generate, publish, sell, or distribute.
+
+AI Media Factory Studio does not determine or guarantee ownership, copyright
+status, commercial usability, legal compliance, or platform compliance of
+imported or generated assets.
