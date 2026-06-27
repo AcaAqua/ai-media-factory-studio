@@ -279,7 +279,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   gap: 8px;
   margin-top: 10px;
 }
-.comparison-card, .storage-card, .diagnostic-card, .civitai-card {
+.comparison-card, .storage-card, .diagnostic-card, .civitai-card, .asset-registry-card {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #101416;
@@ -287,7 +287,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   display: grid;
   gap: 8px;
 }
-.comparison-card header, .storage-card header, .diagnostic-card header, .civitai-card header {
+.comparison-card header, .storage-card header, .diagnostic-card header, .civitai-card header, .asset-registry-card header {
   display: flex;
   justify-content: space-between;
   gap: 8px;
@@ -312,6 +312,35 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   background: #14191b;
   padding: 10px;
   margin-bottom: 12px;
+}
+.asset-registry-summary {
+  margin: 10px 0;
+}
+.asset-registry-list {
+  display: grid;
+  gap: 10px;
+}
+.asset-registry-list details {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #14191b;
+  padding: 10px;
+}
+.asset-registry-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.asset-registry-card.missing {
+  border-color: rgba(255, 205, 97, .45);
+}
+.asset-registry-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
 }
 .file-list {
   display: grid;

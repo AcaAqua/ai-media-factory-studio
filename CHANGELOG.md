@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.9-dev - Unreleased
+
+- Added initial Studio asset registry tables for model, LoRA, VAE, ControlNet, upscaler, and workflow locations.
+- Added non-destructive asset scanning that records file metadata without moving or deleting source files.
+- Added Studio asset registry panel and rescan action to the Models view.
+
 ## v0.1.8 - 2026-06-27
 
 - Added local dictionary-based Japanese Prompt to English tag Prompt conversion.

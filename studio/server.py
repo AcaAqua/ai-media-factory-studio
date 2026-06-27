@@ -22,7 +22,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
-APP_VERSION = "0.1.8"
+APP_VERSION = "0.1.9-dev"
 ROOT = Path(__file__).resolve().parents[1]
 STUDIO = ROOT / "studio"
 STATIC = STUDIO / "static"
@@ -45,6 +45,14 @@ STORAGE_USAGE_TYPES = {"generated", "references", "exports", "thumbnails", "back
 LOCAL_SHUTDOWN_HOSTS = {"127.0.0.1", "::1", "localhost"}
 PROMPT_SPLIT_RE = re.compile(r"[、，,。．.\n\r\t\s]+")
 PROMPT_PARTICLE_RE = re.compile(r"^[のにをがはでとへやも]|[のにをがはでとへやも]$")
+ASSET_REGISTRY_EXTENSIONS = {
+    "checkpoint": {".safetensors", ".ckpt", ".pt", ".pth", ".bin"},
+    "lora": {".safetensors", ".pt", ".ckpt"},
+    "vae": {".safetensors", ".ckpt", ".pt"},
+    "controlnet": {".safetensors", ".ckpt", ".pt", ".pth"},
+    "upscaler": {".pth", ".pt", ".safetensors", ".onnx"},
+    "workflow": {".json"},
+}
 
 
 def now_iso() -> str:
@@ -643,6 +651,195 @@ def test_storage_location(payload: dict[str, Any]) -> dict[str, Any]:
                 (1 if exists else 0, 1 if writable else 0, free, relative_path, compatible, validation_result, storage_id),
             )
     return {"ok": exists and writable, "path_exists": exists, "writable": writable, "free_space_bytes": free, "error": error}
+
+
+def resolve_asset_location_path(base_path: str) -> Path:
+    path = Path(str(base_path))
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.resolve()
+
+
+def asset_registry_location_status(location: dict[str, Any]) -> dict[str, Any]:
+    path = resolve_asset_location_path(location["base_path"])
+    result = dict(location)
+    result["resolved_path"] = str(path)
+    result["path_exists"] = path.exists() and path.is_dir()
+    return result
+
+
+def list_asset_registry() -> dict[str, Any]:
+    with db() as con:
+        locations = rows(con, "SELECT * FROM asset_registry_locations ORDER BY asset_kind, name")
+        items = rows(
+            con,
+            """
+            SELECT i.*, l.name AS location_name, l.base_path AS location_base_path
+            FROM asset_registry_items i
+            LEFT JOIN asset_registry_locations l ON l.location_id = i.location_id
+            ORDER BY i.asset_kind, i.missing, i.name
+            LIMIT 500
+            """,
+        )
+        scan_runs = rows(con, "SELECT * FROM asset_scan_runs ORDER BY started_at DESC LIMIT 20")
+        counts = rows(
+            con,
+            """
+            SELECT asset_kind, missing, COUNT(*) AS count
+            FROM asset_registry_items
+            GROUP BY asset_kind, missing
+            ORDER BY asset_kind, missing
+            """,
+        )
+    return {
+        "ok": True,
+        "locations": [asset_registry_location_status(item) for item in locations],
+        "items": items,
+        "scan_runs": scan_runs,
+        "counts": counts,
+    }
+
+
+def validate_asset_location_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    name = str(payload.get("name") or "").strip()
+    asset_kind = str(payload.get("asset_kind") or "").strip()
+    base_path = str(payload.get("base_path") or "").strip()
+    if not name:
+        raise ValueError("location name is required")
+    if asset_kind not in ASSET_REGISTRY_EXTENSIONS:
+        raise ValueError("invalid asset kind")
+    if not base_path:
+        raise ValueError("base path is required")
+    return {
+        "name": name,
+        "asset_kind": asset_kind,
+        "base_path": base_path.replace("\\", "/") if not Path(base_path).is_absolute() else base_path,
+        "is_external": 1 if payload.get("is_external") else 0,
+        "is_enabled": 1 if payload.get("is_enabled", True) else 0,
+        "notes": str(payload.get("notes") or "").strip(),
+    }
+
+
+def create_asset_registry_location(payload: dict[str, Any]) -> dict[str, Any]:
+    data = validate_asset_location_payload(payload)
+    location_id = payload.get("location_id") or new_id("arl")
+    with db() as con:
+        con.execute(
+            """
+            INSERT INTO asset_registry_locations
+              (location_id, name, asset_kind, base_path, is_external, is_enabled, notes, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(asset_kind, base_path) DO UPDATE SET
+              name = excluded.name,
+              asset_kind = excluded.asset_kind,
+              is_external = excluded.is_external,
+              is_enabled = excluded.is_enabled,
+              notes = excluded.notes,
+              updated_at = datetime('now')
+            """,
+            (location_id, data["name"], data["asset_kind"], data["base_path"], data["is_external"], data["is_enabled"], data["notes"]),
+        )
+    return list_asset_registry()
+
+
+def scan_asset_registry_location(con: sqlite3.Connection, location: dict[str, Any]) -> dict[str, Any]:
+    location_id = location["location_id"]
+    asset_kind = location["asset_kind"]
+    base = resolve_asset_location_path(location["base_path"])
+    scan_id = new_id("scan")
+    con.execute("INSERT INTO asset_scan_runs (scan_id, location_id) VALUES (?, ?)", (scan_id, location_id))
+    if not base.exists() or not base.is_dir():
+        con.execute(
+            """
+            UPDATE asset_scan_runs
+            SET status = 'failed', finished_at = datetime('now'), error_message = ?
+            WHERE scan_id = ?
+            """,
+            ("path_missing", scan_id),
+        )
+        return {"scan_id": scan_id, "status": "failed", "error_message": "path_missing"}
+
+    allowed_ext = ASSET_REGISTRY_EXTENSIONS.get(asset_kind, set())
+    seen_paths = set()
+    scanned = added = updated = 0
+    for path in sorted(base.rglob("*")):
+        if not path.is_file():
+            continue
+        extension = path.suffix.lower()
+        if allowed_ext and extension not in allowed_ext:
+            continue
+        try:
+            relative_path = path.relative_to(base).as_posix()
+        except ValueError:
+            continue
+        seen_paths.add(relative_path)
+        scanned += 1
+        stat = path.stat()
+        existing = row(con, "SELECT item_id, size_bytes, missing FROM asset_registry_items WHERE location_id = ? AND relative_path = ?", (location_id, relative_path))
+        item_id = existing["item_id"] if existing else new_id("ari")
+        con.execute(
+            """
+            INSERT INTO asset_registry_items
+              (item_id, location_id, asset_kind, name, relative_path, file_name, extension, size_bytes, missing, last_seen_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'), datetime('now'))
+            ON CONFLICT(location_id, relative_path) DO UPDATE SET
+              asset_kind = excluded.asset_kind,
+              name = excluded.name,
+              file_name = excluded.file_name,
+              extension = excluded.extension,
+              size_bytes = excluded.size_bytes,
+              missing = 0,
+              last_seen_at = datetime('now'),
+              updated_at = datetime('now')
+            """,
+            (item_id, location_id, asset_kind, path.stem, relative_path, path.name, extension, stat.st_size),
+        )
+        if existing:
+            if existing.get("size_bytes") != stat.st_size or existing.get("missing"):
+                updated += 1
+        else:
+            added += 1
+
+    existing_paths = {
+        item["relative_path"]
+        for item in rows(con, "SELECT relative_path FROM asset_registry_items WHERE location_id = ? AND missing = 0", (location_id,))
+    }
+    missing_paths = sorted(existing_paths - seen_paths)
+    for relative_path in missing_paths:
+        con.execute(
+            "UPDATE asset_registry_items SET missing = 1, updated_at = datetime('now') WHERE location_id = ? AND relative_path = ?",
+            (location_id, relative_path),
+        )
+    con.execute(
+        """
+        UPDATE asset_scan_runs
+        SET status = 'completed', finished_at = datetime('now'), scanned_count = ?, added_count = ?, updated_count = ?, missing_count = ?
+        WHERE scan_id = ?
+        """,
+        (scanned, added, updated, len(missing_paths), scan_id),
+    )
+    con.execute("UPDATE asset_registry_locations SET last_scanned_at = datetime('now'), updated_at = datetime('now') WHERE location_id = ?", (location_id,))
+    return {
+        "scan_id": scan_id,
+        "status": "completed",
+        "scanned_count": scanned,
+        "added_count": added,
+        "updated_count": updated,
+        "missing_count": len(missing_paths),
+    }
+
+
+def scan_asset_registry(payload: dict[str, Any]) -> dict[str, Any]:
+    target_location = str(payload.get("location_id") or "").strip()
+    with db() as con:
+        if target_location:
+            locations = rows(con, "SELECT * FROM asset_registry_locations WHERE location_id = ? AND is_enabled = 1", (target_location,))
+        else:
+            locations = rows(con, "SELECT * FROM asset_registry_locations WHERE is_enabled = 1 ORDER BY asset_kind, name")
+        results = [scan_asset_registry_location(con, location) for location in locations]
+    state = list_asset_registry()
+    state["scan_results"] = results
+    return state
 
 
 def board_assets(filters: dict[str, str]) -> dict[str, Any]:
@@ -1662,6 +1859,23 @@ def bootstrap() -> dict[str, Any]:
             "comparisons": list_comparisons({})["comparisons"],
             "tags": rows(con, "SELECT * FROM tags ORDER BY name"),
             "panel_state": get_setting(con, "panel_state", {}),
+            "asset_registry": {
+                "locations": [
+                    asset_registry_location_status(item)
+                    for item in rows(con, "SELECT * FROM asset_registry_locations ORDER BY asset_kind, name")
+                ],
+                "items": rows(
+                    con,
+                    """
+                    SELECT i.*, l.name AS location_name, l.base_path AS location_base_path
+                    FROM asset_registry_items i
+                    LEFT JOIN asset_registry_locations l ON l.location_id = i.location_id
+                    ORDER BY i.asset_kind, i.missing, i.name
+                    LIMIT 500
+                    """,
+                ),
+                "scan_runs": rows(con, "SELECT * FROM asset_scan_runs ORDER BY started_at DESC LIMIT 20"),
+            },
             "prompt_translation": {
                 "terms": rows(
                     con,
@@ -1732,6 +1946,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/storage":
             self.send_json(list_storage_locations())
+            return
+        if self.path == "/api/asset-registry":
+            self.send_json(list_asset_registry())
             return
         if self.path == "/api/comparisons" or self.path.startswith("/api/comparisons?"):
             self.send_json(list_comparisons(parse_query_params(self.path)))
@@ -1820,6 +2037,12 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if self.path == "/api/civitai/config":
                 self.send_json(save_civitai_config(self.read_body()))
+                return
+            if self.path == "/api/asset-registry/locations":
+                self.send_json(create_asset_registry_location(self.read_body()))
+                return
+            if self.path == "/api/asset-registry/scan":
+                self.send_json(scan_asset_registry(self.read_body()))
                 return
             if self.path == "/api/prompt-translation/convert":
                 self.send_json(convert_prompt_translation(self.read_body()))

@@ -194,6 +194,37 @@
             <div id="modelList" class="model-list"></div>
           </div>
           <div class="surface">
+            <div class="section-head">
+              <h2>Studio資産台帳</h2>
+              <button class="secondary" type="button" id="scanAssetRegistry">再スキャン</button>
+            </div>
+            <p class="note">モデル、LoRA、VAE、ControlNet、Upscaler、Workflowを移動せずに参照登録します。初期実装ではファイルの存在、サイズ、保存場所を台帳化します。</p>
+            <form class="inline-form" id="assetLocationForm">
+              <label class="field">
+                <span>種類</span>
+                <select id="assetLocationKind">
+                  <option value="checkpoint">Checkpoint</option>
+                  <option value="lora">LoRA</option>
+                  <option value="vae">VAE</option>
+                  <option value="controlnet">ControlNet</option>
+                  <option value="upscaler">Upscaler</option>
+                  <option value="workflow">Workflow</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>名前</span>
+                <input id="assetLocationName" placeholder="NAS LoRA / External Workflows">
+              </label>
+              <label class="field">
+                <span>パス</span>
+                <input id="assetLocationPath" placeholder="D:\Shared\Models\loras または models/loras">
+              </label>
+              <button type="submit">保存先登録</button>
+            </form>
+            <div class="asset-registry-summary" id="assetRegistrySummary"></div>
+            <div class="asset-registry-list" id="assetRegistryList"></div>
+          </div>
+          <div class="surface">
             <div class="section-head"><h2>Civitai連携</h2></div>
             <div class="civitai-config">
               <div>
@@ -255,7 +286,7 @@
               <h2>About</h2>
               <dl class="info-list">
                 <dt>Product</dt><dd>AI Media Factory Studio</dd>
-                <dt>Version</dt><dd>v0.1.8</dd>
+                <dt>Version</dt><dd>v0.1.9-dev</dd>
                 <dt>Brand</dt><dd>Designed & developed by LuckyFields LLC</dd>
                 <dt>License</dt><dd>Apache License 2.0</dd>
                 <dt>Notice</dt><dd>Local-first tool for ComfyUI &amp; Ollama. Third-party models and assets are managed by the user.</dd>

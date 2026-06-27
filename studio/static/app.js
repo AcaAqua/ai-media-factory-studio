@@ -13,6 +13,7 @@ let boardAssets = [];
 let boardLoaded = false;
 let civitaiConfig = null;
 let promptTranslation = { terms: [], presets: [], history: [], last: null };
+let assetRegistry = { locations: [], items: [], scan_runs: [] };
 
 const FIELD_LABELS = {
   positive_prompt: "Positive Prompt",
@@ -49,6 +50,7 @@ async function load() {
     ...(state.prompt_translation || {}),
     last: promptTranslation.last,
   };
+  assetRegistry = state.asset_registry || assetRegistry;
   await loadCivitaiConfig().catch(() => { civitaiConfig = null; });
   render();
 }
@@ -661,10 +663,110 @@ function renderModels() {
   const models = state.connections.ollama.models || [];
   if (!models.length) {
     list.innerHTML = `<div class="empty-state">Ollamaモデル一覧を取得できませんでした。</div>`;
+  } else {
+    list.innerHTML = models.map((model) => `<span class="chip ok">${escapeHtml(model)}</span>`).join("");
+  }
+  renderAssetRegistry();
+  renderCivitaiConfig();
+}
+
+function assetKindLabel(kind) {
+  return {
+    checkpoint: "Checkpoint",
+    lora: "LoRA",
+    vae: "VAE",
+    controlnet: "ControlNet",
+    upscaler: "Upscaler",
+    workflow: "Workflow",
+  }[kind] || kind;
+}
+
+function renderAssetRegistry() {
+  const summary = $("#assetRegistrySummary");
+  const list = $("#assetRegistryList");
+  if (!summary || !list) return;
+  const locations = assetRegistry.locations || [];
+  const items = assetRegistry.items || [];
+  const counts = items.reduce((acc, item) => {
+    const key = item.asset_kind || "unknown";
+    acc[key] = (acc[key] || 0) + (item.missing ? 0 : 1);
+    return acc;
+  }, {});
+  summary.innerHTML = `
+    <div class="chip-list">
+      ${Object.entries(counts).map(([kind, count]) => `<span class="chip ok">${escapeHtml(assetKindLabel(kind))}: ${escapeHtml(count)}</span>`).join("") || `<span class="chip warn">未スキャン</span>`}
+      <span class="chip">保存先 ${locations.length}</span>
+      <span class="chip">最終スキャン ${escapeHtml((assetRegistry.scan_runs || [])[0]?.finished_at || "-")}</span>
+    </div>
+  `;
+  const locationHtml = locations.map((location) => `
+    <article class="asset-registry-card ${location.path_exists ? "" : "missing"}">
+      <header>
+        <strong>${escapeHtml(location.name)}</strong>
+        <span class="chip ${location.path_exists ? "ok" : "warn"}">${escapeHtml(assetKindLabel(location.asset_kind))}</span>
+      </header>
+      <p>${escapeHtml(location.base_path)}</p>
+      <p>${escapeHtml(location.path_exists ? "path ok" : "path missing")} / ${location.is_external ? "external" : "studio"} / scan ${escapeHtml(location.last_scanned_at || "-")}</p>
+    </article>
+  `).join("");
+  const itemHtml = items.slice(0, 80).map((item) => `
+    <article class="asset-registry-card ${item.missing ? "missing" : ""}">
+      <header>
+        <strong>${escapeHtml(item.name)}</strong>
+        <span class="chip ${item.missing ? "warn" : "ok"}">${escapeHtml(assetKindLabel(item.asset_kind))}</span>
+      </header>
+      <p>${escapeHtml(item.relative_path)}</p>
+      <p>${escapeHtml(item.location_name || "-")} / ${formatBytes(item.size_bytes || 0)} / ${escapeHtml(item.status || "unverified")}</p>
+    </article>
+  `).join("");
+  list.innerHTML = `
+    <details open>
+      <summary>保存先 ${locations.length}件</summary>
+      <div class="asset-registry-grid">${locationHtml || `<div class="empty-state">保存先がありません。</div>`}</div>
+    </details>
+    <details open>
+      <summary>登録資産 ${items.length}件</summary>
+      <div class="asset-registry-grid">${itemHtml || `<div class="empty-state">まだスキャンされていません。</div>`}</div>
+    </details>
+  `;
+}
+
+async function refreshAssetRegistry() {
+  assetRegistry = await api("/api/asset-registry");
+  renderAssetRegistry();
+}
+
+async function scanAssetRegistry() {
+  $("#scanAssetRegistry").disabled = true;
+  try {
+    assetRegistry = await api("/api/asset-registry/scan", { method: "POST", body: "{}" });
+    renderAssetRegistry();
+  } finally {
+    $("#scanAssetRegistry").disabled = false;
+  }
+}
+
+async function saveAssetLocation(event) {
+  event.preventDefault();
+  const name = $("#assetLocationName").value.trim();
+  const basePath = $("#assetLocationPath").value.trim();
+  if (!name || !basePath) {
+    alert("保存先の名前とパスを入力してください。");
     return;
   }
-  list.innerHTML = models.map((model) => `<span class="chip ok">${escapeHtml(model)}</span>`).join("");
-  renderCivitaiConfig();
+  assetRegistry = await api("/api/asset-registry/locations", {
+    method: "POST",
+    body: JSON.stringify({
+      name,
+      asset_kind: $("#assetLocationKind").value,
+      base_path: basePath,
+      is_external: !basePath.startsWith("models/") && !basePath.startsWith("workflows/"),
+      is_enabled: true,
+    }),
+  });
+  $("#assetLocationName").value = "";
+  $("#assetLocationPath").value = "";
+  renderAssetRegistry();
 }
 
 async function loadCivitaiConfig() {
@@ -1593,6 +1695,8 @@ $("#deleteCivitaiKey").addEventListener("click", () => deleteCivitaiKey().catch(
 $("#civitaiLookupForm").addEventListener("submit", (event) => lookupCivitai(event).catch((error) => {
   $("#civitaiPreview").innerHTML = `<div class="empty-state">取得できませんでした: ${escapeHtml(error.message)}</div>`;
 }));
+$("#scanAssetRegistry").addEventListener("click", () => scanAssetRegistry().catch((error) => alert(error.message)));
+$("#assetLocationForm").addEventListener("submit", (event) => saveAssetLocation(event).catch((error) => alert(error.message)));
 $("#refreshButton").addEventListener("click", async () => {
   await api("/api/jobs/poll", { method: "POST", body: "{}" }).catch(() => null);
   await load();
