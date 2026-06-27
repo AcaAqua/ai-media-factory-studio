@@ -532,6 +532,27 @@
         </form>
       </dialog>
 
+      <dialog class="recipe-dialog wide-dialog" id="databaseRestoreDialog">
+        <form method="dialog" id="databaseRestoreForm">
+          <h2>DB復元</h2>
+          <p class="note">復元前に現在のDBを自動バックアップします。復元後は画面を再読み込みします。</p>
+          <label class="field">
+            <span>復元するバックアップ</span>
+            <select id="databaseRestoreBackup"></select>
+          </label>
+          <label class="field">
+            <span>確認入力</span>
+            <input id="databaseRestoreConfirmText" placeholder="RESTORE">
+          </label>
+          <p class="note" id="databaseRestoreResult"></p>
+          <div class="storage-list" id="databaseBackupList"></div>
+          <div class="dialog-actions">
+            <button class="danger" type="submit">選択バックアップで復元</button>
+            <button class="secondary" type="button" id="cancelDatabaseRestore">閉じる</button>
+          </div>
+        </form>
+      </dialog>
+
       <dialog class="recipe-dialog wide-dialog" id="translationTermsDialog">
         <form method="dialog" id="translationTermForm">
           <h2>Prompt変換辞書</h2>

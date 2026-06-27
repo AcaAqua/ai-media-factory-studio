@@ -132,6 +132,61 @@ def create_database_backup(reason: str = "manual") -> dict[str, Any]:
     }
 
 
+def list_database_backups() -> dict[str, Any]:
+    backup_root = DATA / "backups"
+    backups = []
+    if backup_root.exists():
+        for path in sorted(backup_root.rglob(DB_PATH.name), key=lambda item: item.stat().st_mtime, reverse=True):
+            try:
+                relative = path.relative_to(ROOT).as_posix()
+            except ValueError:
+                continue
+            backups.append(
+                {
+                    "name": path.parent.name,
+                    "relative_path": relative,
+                    "size_bytes": path.stat().st_size,
+                    "created_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).replace(microsecond=0).isoformat(),
+                }
+            )
+    return {"ok": True, "backups": backups[:100]}
+
+
+def resolve_database_backup(relative_path: str) -> Path:
+    if not relative_path:
+        raise ValueError("backup path is required")
+    backup_root = (DATA / "backups").resolve()
+    candidate = (ROOT / relative_path).resolve()
+    try:
+        candidate.relative_to(backup_root)
+    except ValueError as exc:
+        raise ValueError("backup path must be under studio/data/backups") from exc
+    if candidate.name != DB_PATH.name:
+        raise ValueError("backup file name is invalid")
+    if not candidate.exists() or not candidate.is_file():
+        raise ValueError("backup file does not exist")
+    return candidate
+
+
+def restore_database_backup(payload: dict[str, Any]) -> dict[str, Any]:
+    confirm_text = str(payload.get("confirm_text") or "").strip()
+    if confirm_text != "RESTORE":
+        raise ValueError("confirm_text must be RESTORE")
+    backup_path = resolve_database_backup(str(payload.get("relative_path") or ""))
+    pre_restore = create_database_backup("pre-restore")
+    with sqlite3.connect(backup_path) as source:
+        with sqlite3.connect(DB_PATH) as target:
+            source.backup(target)
+    run_migrations()
+    return {
+        "ok": True,
+        "restored_from": backup_path.relative_to(ROOT).as_posix(),
+        "pre_restore_backup": pre_restore,
+        "restored_at": now_iso(),
+        "reload_required": True,
+    }
+
+
 def run_migrations() -> None:
     DATA.mkdir(parents=True, exist_ok=True)
     THUMBNAILS.mkdir(parents=True, exist_ok=True)
@@ -2299,6 +2354,9 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/api/setup/status":
             self.send_json(setup_status())
             return
+        if self.path == "/api/database/backups":
+            self.send_json(list_database_backups())
+            return
         if self.path == "/api/prompt-translation":
             self.send_json(prompt_translation_state())
             return
@@ -2375,6 +2433,9 @@ class Handler(SimpleHTTPRequestHandler):
                 payload = self.read_body()
                 reason = str(payload.get("reason") or "manual")
                 self.send_json(create_database_backup(reason))
+                return
+            if self.path == "/api/database/restore":
+                self.send_json(restore_database_backup(self.read_body()))
                 return
             if self.path == "/api/civitai/lookup":
                 self.send_json(lookup_civitai_model(self.read_body()))

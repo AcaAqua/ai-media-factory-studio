@@ -15,6 +15,7 @@ let civitaiConfig = null;
 let promptTranslation = { terms: [], presets: [], history: [], last: null };
 let assetRegistry = { locations: [], items: [], scan_runs: [] };
 let setupStatus = null;
+let databaseBackups = [];
 let activeAssetRegistryItem = null;
 let lastCivitaiLookup = null;
 
@@ -1325,6 +1326,9 @@ function renderSetupStatus() {
     </div>
     <div class="diagnostic-notes">
       <p>ローカル配布に向けた最小セットアップ状態です。DBバックアップは ` + "`studio/data/backups/`" + ` に作成され、Git公開対象には含まれません。</p>
+      <div class="action-row">
+        <button class="secondary" type="button" id="openDatabaseRestoreDialog">復元候補を確認</button>
+      </div>
     </div>
   `;
 }
@@ -1338,6 +1342,52 @@ async function createDatabaseBackup() {
   renderSetupStatus();
   await load();
   alert(`DBバックアップを作成しました。\n${result.relative_path}\n${formatBytes(result.size_bytes)}`);
+}
+
+async function openDatabaseRestoreDialog() {
+  const result = await api("/api/database/backups");
+  databaseBackups = result.backups || [];
+  renderDatabaseBackups();
+  $("#databaseRestoreConfirmText").value = "";
+  $("#databaseRestoreResult").textContent = "";
+  $("#databaseRestoreDialog").showModal();
+}
+
+function renderDatabaseBackups() {
+  const list = $("#databaseBackupList");
+  const select = $("#databaseRestoreBackup");
+  if (!list || !select) return;
+  select.innerHTML = databaseBackups
+    .map((backup) => `<option value="${escapeHtml(backup.relative_path)}">${escapeHtml(`${backup.name} / ${formatBytes(backup.size_bytes)}`)}</option>`)
+    .join("");
+  list.innerHTML = databaseBackups.length
+    ? databaseBackups.slice(0, 30).map((backup) => `
+      <article class="storage-card">
+        <header><strong>${escapeHtml(backup.name)}</strong><span class="chip ok">${escapeHtml(formatBytes(backup.size_bytes))}</span></header>
+        <p>${escapeHtml(backup.relative_path)}</p>
+        <p>${escapeHtml(backup.created_at || "-")}</p>
+      </article>
+    `).join("")
+    : `<div class="empty-state">DBバックアップがありません。</div>`;
+}
+
+async function restoreDatabaseBackup(event) {
+  event.preventDefault();
+  const relativePath = $("#databaseRestoreBackup").value;
+  const confirmText = $("#databaseRestoreConfirmText").value.trim();
+  if (confirmText !== "RESTORE") {
+    $("#databaseRestoreResult").textContent = "復元するには RESTORE と入力してください。";
+    return;
+  }
+  const confirmed = confirm("DBを選択したバックアップで復元します。現在のDBは復元直前に自動バックアップされます。続行しますか？");
+  if (!confirmed) return;
+  const result = await api("/api/database/restore", {
+    method: "POST",
+    body: JSON.stringify({ relative_path: relativePath, confirm_text: confirmText }),
+  });
+  $("#databaseRestoreResult").textContent = `復元しました。退避バックアップ: ${result.pre_restore_backup?.relative_path || "-"}`;
+  alert("DB復元が完了しました。画面を再読み込みします。");
+  location.reload();
 }
 
 function renderDiagnostics() {
@@ -1964,6 +2014,8 @@ document.addEventListener("click", (event) => {
   if (editRegistryButton) openAssetRegistryItem(editRegistryButton.dataset.editRegistryItem);
   const applyCivitaiButton = event.target.closest("#applyCivitaiToAsset");
   if (applyCivitaiButton) applyCivitaiToAsset().catch((error) => alert(error.message));
+  const openRestoreButton = event.target.closest("#openDatabaseRestoreDialog");
+  if (openRestoreButton) openDatabaseRestoreDialog().catch((error) => alert(error.message));
 });
 
 document.addEventListener("change", (event) => {
@@ -2018,6 +2070,8 @@ $("#closeCompare").addEventListener("click", closeCompareView);
 $("#saveCompare").addEventListener("click", () => saveComparisonSet().catch((error) => alert(error.message)));
 $("#resyncJobs").addEventListener("click", () => resyncJobs().catch((error) => alert(error.message)));
 $("#createDbBackup").addEventListener("click", () => createDatabaseBackup().catch((error) => alert(error.message)));
+$("#databaseRestoreForm").addEventListener("submit", (event) => restoreDatabaseBackup(event).catch((error) => alert(error.message)));
+$("#cancelDatabaseRestore").addEventListener("click", () => $("#databaseRestoreDialog").close());
 $("#shutdownStudio").addEventListener("click", () => shutdownStudio().catch((error) => alert(error.message)));
 $("#openStorageDialog").addEventListener("click", () => openStorageDialog("general"));
 $("#detectMapping").addEventListener("click", () => detectMapping().catch((error) => alert(error.message)));

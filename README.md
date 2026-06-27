@@ -105,9 +105,10 @@ http://127.0.0.1:8765/
 3. Confirm ComfyUI and Ollama connection status in Settings.
 4. Review the Local Setup panel in Settings.
 5. Create a manual DB backup from Settings before larger operational changes.
-6. Register or scan workflows.
-7. Open Workflow input mapping and save mappings before real generation.
-8. Configure Adult Local storage only if the directory is inside the ComfyUI output root.
+6. Use the guarded DB restore dialog only when you intentionally want to replace the current local database with a selected backup.
+7. Register or scan workflows.
+8. Open Workflow input mapping and save mappings before real generation.
+9. Configure Adult Local storage only if the directory is inside the ComfyUI output root.
 
 ## Roadmap
 
@@ -143,6 +144,7 @@ Public issue reporting should be enabled only after the first public repository 
 
 - ComfyUI and Ollama are external local services and must be installed and started separately.
 - The launcher is a PowerShell helper, not a signed packaged installer.
+- DB restore is local-only and intentionally requires explicit confirmation text.
 - Model and LoRA downloads are not automated yet.
 - Video import is reserved for a future version.
 - This project controls Studio only; it does not redistribute ComfyUI, models, custom nodes, or third-party checkpoints.
