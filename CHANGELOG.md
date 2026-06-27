@@ -5,6 +5,10 @@
 - Added diagnostics API and diagnostics panel.
 - Added job resync endpoint and UI action.
 - Surfaced connection, database, job, storage, mapping, and Adult Local risks.
+- Added local UI shutdown action for the Studio server.
+- Added a public roadmap for external ComfyUI/Ollama integration and Studio-managed asset registry direction.
+- Added Civitai URL metadata lookup and preview.
+- Added local-only Civitai API key save/delete/test controls.
 - Updated About screen version to `v0.1.7`.
 
 ## v0.1.6 - 2026-06-27

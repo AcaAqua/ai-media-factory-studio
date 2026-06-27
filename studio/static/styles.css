@@ -25,6 +25,15 @@ svg { width: 18px; height: 18px; fill: currentColor; }
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr) 280px;
 }
+.shutdown-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.shutdown-screen .surface {
+  max-width: 520px;
+}
 
 .side-nav {
   border-right: 1px solid var(--line);
@@ -270,7 +279,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   gap: 8px;
   margin-top: 10px;
 }
-.comparison-card, .storage-card, .diagnostic-card {
+.comparison-card, .storage-card, .diagnostic-card, .civitai-card {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #101416;
@@ -278,11 +287,46 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   display: grid;
   gap: 8px;
 }
-.comparison-card header, .storage-card header, .diagnostic-card header {
+.comparison-card header, .storage-card header, .diagnostic-card header, .civitai-card header {
   display: flex;
   justify-content: space-between;
   gap: 8px;
   align-items: center;
+}
+.inline-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+.civitai-preview {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+.civitai-config {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #14191b;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+.file-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+.file-list div {
+  display: grid;
+  gap: 2px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.file-list span {
+  color: var(--muted);
+  font-size: 12px;
 }
 .storage-list {
   display: grid;

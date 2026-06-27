@@ -103,6 +103,10 @@ powershell -ExecutionPolicy Bypass -File scripts\start_studio.ps1
 5. Open Workflow input mapping and save mappings before real generation.
 6. Configure Adult Local storage only if the directory is inside the ComfyUI output root.
 
+## Roadmap
+
+See `docs/roadmap.md` for the local app roadmap. The current direction keeps ComfyUI and Ollama as external integrations while moving models, LoRA files, workflows, and other assets toward a Studio-managed registry that can scan both Studio-standard folders and existing external folders without forced file relocation.
+
 ## Public Repository Boundary
 
 Intended public source:

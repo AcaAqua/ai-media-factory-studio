@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -29,15 +30,19 @@ DATA = STUDIO / "data"
 DB_PATH = DATA / "media_factory.sqlite3"
 MIGRATIONS = DATA / "migrations"
 CONFIG = STUDIO / "config"
+PUBLIC_CONFIG = ROOT / "config"
+LOCAL_CONFIG_PATH = PUBLIC_CONFIG / "studio.local.json"
 THUMBNAILS = STUDIO / "thumbnails"
 DEFAULT_COMFY = "http://127.0.0.1:8188"
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
+CIVITAI_API = "https://civitai.com/api/v1"
 CLIENT_ID = "ai-media-factory-studio"
 REQUIRED_MAPPINGS = ("positive_prompt", "seed", "width", "height", "output")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 CONTENT_SCOPES = {"sfw", "sensitive", "adult_local"}
 STORAGE_SCOPES = {"general", "sensitive", "adult_local"}
 STORAGE_USAGE_TYPES = {"generated", "references", "exports", "thumbnails", "backups"}
+LOCAL_SHUTDOWN_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
 def now_iso() -> str:
@@ -170,6 +175,67 @@ def get_setting(con: sqlite3.Connection, key: str, fallback: Any = None) -> Any:
         return json.loads(row["value_json"])
     except json.JSONDecodeError:
         return fallback
+
+
+def load_local_config() -> dict[str, Any]:
+    if not LOCAL_CONFIG_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(LOCAL_CONFIG_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_local_config(payload: dict[str, Any]) -> None:
+    PUBLIC_CONFIG.mkdir(parents=True, exist_ok=True)
+    LOCAL_CONFIG_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_civitai_token() -> str:
+    env_token = os.environ.get("CIVITAI_API_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    civitai = load_local_config().get("civitai", {})
+    return str(civitai.get("api_token") or "").strip() if isinstance(civitai, dict) else ""
+
+
+def civitai_config_status() -> dict[str, Any]:
+    local_config = load_local_config()
+    local_token = isinstance(local_config.get("civitai"), dict) and bool(local_config["civitai"].get("api_token"))
+    env_token = bool(os.environ.get("CIVITAI_API_TOKEN", "").strip())
+    return {
+        "ok": True,
+        "civitai": {
+            "has_token": env_token or local_token,
+            "source": "environment" if env_token else ("local_config" if local_token else "none"),
+        },
+    }
+
+
+def save_civitai_config(payload: dict[str, Any]) -> dict[str, Any]:
+    token = str(payload.get("api_token") or "").strip()
+    if not token:
+        raise ValueError("Civitai API key is required")
+    local_config = load_local_config()
+    civitai = local_config.get("civitai", {}) if isinstance(local_config.get("civitai"), dict) else {}
+    civitai["api_token"] = token
+    local_config["civitai"] = civitai
+    save_local_config(local_config)
+    return civitai_config_status()
+
+
+def delete_civitai_config() -> dict[str, Any]:
+    local_config = load_local_config()
+    if isinstance(local_config.get("civitai"), dict):
+        local_config["civitai"].pop("api_token", None)
+        if not local_config["civitai"]:
+            local_config.pop("civitai", None)
+        if local_config:
+            save_local_config(local_config)
+        elif LOCAL_CONFIG_PATH.exists():
+            LOCAL_CONFIG_PATH.unlink()
+    return civitai_config_status()
 
 
 def rows(con: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -896,6 +962,137 @@ def relative_to_storage(path: Path, storage_base: Path) -> str:
         return path.name
 
 
+def strip_sensitive_query(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.query:
+        return url
+    sensitive = {"token", "api_key", "apikey", "key", "Authorization", "authorization"}
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    safe_pairs = []
+    for key, values in query.items():
+        if key in sensitive:
+            continue
+        for value in values:
+            safe_pairs.append((key, value))
+    from urllib.parse import urlencode
+
+    return parsed._replace(query=urlencode(safe_pairs, doseq=True)).geturl()
+
+
+def civitai_request(path: str) -> tuple[bool, Any]:
+    headers = {"User-Agent": "AI-Media-Factory-Studio/0.1.7"}
+    token = get_civitai_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = Request(f"{CIVITAI_API}{path}", headers=headers)
+    try:
+        with urlopen(req, timeout=8) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            return True, json.loads(raw) if raw else {}
+    except Exception as exc:
+        return False, str(exc)
+
+
+def parse_civitai_url(value: str) -> dict[str, str]:
+    parsed = urlparse(value.strip())
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Civitai URL must start with http:// or https://")
+    host = parsed.netloc.lower()
+    if host not in {"civitai.com", "www.civitai.com"}:
+        raise ValueError("Only civitai.com URLs are supported")
+    path_parts = [part for part in parsed.path.split("/") if part]
+    query = parse_qs(parsed.query)
+    result: dict[str, str] = {}
+    if len(path_parts) >= 2 and path_parts[0] == "models" and path_parts[1].isdigit():
+        result["model_id"] = path_parts[1]
+        if query.get("modelVersionId") and query["modelVersionId"][0].isdigit():
+            result["version_id"] = query["modelVersionId"][0]
+        return result
+    if len(path_parts) >= 3 and path_parts[:2] == ["api", "download"] and path_parts[2] == "models":
+        if len(path_parts) >= 4 and path_parts[3].isdigit():
+            result["version_id"] = path_parts[3]
+            return result
+    if len(path_parts) >= 3 and path_parts[:2] == ["api", "v1"]:
+        if path_parts[2] == "model-versions" and len(path_parts) >= 4 and path_parts[3].isdigit():
+            result["version_id"] = path_parts[3]
+            return result
+        if path_parts[2] == "models" and len(path_parts) >= 4 and path_parts[3].isdigit():
+            result["model_id"] = path_parts[3]
+            return result
+    raise ValueError("Unsupported Civitai URL format")
+
+
+def summarize_civitai_model(model: dict[str, Any] | None, version: dict[str, Any] | None, source_url: str) -> dict[str, Any]:
+    model = model or {}
+    version = version or {}
+    files = version.get("files") if isinstance(version.get("files"), list) else []
+    primary_file = next((item for item in files if item.get("primary")), None) or (files[0] if files else {})
+    safe_files = []
+    for item in files:
+        safe_files.append(
+            {
+                "name": item.get("name"),
+                "type": item.get("type"),
+                "size_kb": item.get("sizeKB"),
+                "pickle_scan_result": item.get("pickleScanResult"),
+                "virus_scan_result": item.get("virusScanResult"),
+                "download_url": strip_sensitive_query(item.get("downloadUrl") or ""),
+                "hashes": item.get("hashes") or {},
+            }
+        )
+    return {
+        "source_url": strip_sensitive_query(source_url),
+        "model": {
+            "id": model.get("id") or version.get("modelId"),
+            "name": model.get("name") or version.get("model", {}).get("name"),
+            "type": model.get("type") or version.get("model", {}).get("type"),
+            "nsfw": model.get("nsfw"),
+            "creator": (model.get("creator") or {}).get("username") if isinstance(model.get("creator"), dict) else None,
+            "tags": model.get("tags") or [],
+        },
+        "version": {
+            "id": version.get("id"),
+            "name": version.get("name"),
+            "base_model": version.get("baseModel"),
+            "published_at": version.get("publishedAt"),
+            "trained_words": version.get("trainedWords") or [],
+            "download_url": strip_sensitive_query(
+                version.get("downloadUrl") or primary_file.get("downloadUrl") or f"https://civitai.com/api/download/models/{version.get('id')}"
+            ),
+            "files": safe_files,
+        },
+    }
+
+
+def lookup_civitai_model(payload: dict[str, Any]) -> dict[str, Any]:
+    source_url = str(payload.get("url") or "").strip()
+    if not source_url:
+        raise ValueError("Civitai URL is required")
+    parsed = parse_civitai_url(source_url)
+    model = None
+    version = None
+    if parsed.get("version_id"):
+        ok, version_payload = civitai_request(f"/model-versions/{parsed['version_id']}")
+        if not ok:
+            raise ValueError(f"Civitai version lookup failed: {version_payload}")
+        version = version_payload
+        model_id = parsed.get("model_id") or str(version.get("modelId") or "")
+        if model_id:
+            ok, model_payload = civitai_request(f"/models/{model_id}")
+            if ok:
+                model = model_payload
+    if not version and parsed.get("model_id"):
+        ok, model_payload = civitai_request(f"/models/{parsed['model_id']}")
+        if not ok:
+            raise ValueError(f"Civitai model lookup failed: {model_payload}")
+        model = model_payload
+        versions = model.get("modelVersions") if isinstance(model.get("modelVersions"), list) else []
+        if versions:
+            version = versions[0]
+    if not model and not version:
+        raise ValueError("Civitai metadata was not found")
+    return {"ok": True, "civitai": summarize_civitai_model(model, version, source_url)}
+
 
 def post_json(url: str, payload: dict[str, Any], timeout: float = 5.0) -> tuple[bool, Any]:
     data = json.dumps(payload).encode("utf-8")
@@ -1222,6 +1419,9 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/api/diagnostics":
             self.send_json(diagnostics())
             return
+        if self.path == "/api/civitai/config":
+            self.send_json(civitai_config_status())
+            return
         if self.path.startswith("/api/workflows/") and self.path.endswith("/mapping/candidates"):
             workflow_id = self.path.split("/")[3]
             self.send_json(get_mapping_candidates(workflow_id))
@@ -1254,6 +1454,14 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         try:
+            if self.path == "/api/shutdown":
+                client_host = self.client_address[0]
+                if client_host not in LOCAL_SHUTDOWN_HOSTS:
+                    self.send_json({"error": "shutdown is only available from localhost"}, 403)
+                    return
+                self.send_json({"ok": True, "message": "AI Media Factory Studio is shutting down."})
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                return
             if self.path == "/api/workflows/register":
                 self.send_json(register_workflow(self.read_body()))
                 return
@@ -1269,6 +1477,12 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if self.path == "/api/jobs/resync":
                 self.send_json(resync_generation_jobs(self.read_body()))
+                return
+            if self.path == "/api/civitai/lookup":
+                self.send_json(lookup_civitai_model(self.read_body()))
+                return
+            if self.path == "/api/civitai/config":
+                self.send_json(save_civitai_config(self.read_body()))
                 return
             if self.path == "/api/recipes":
                 self.send_json(create_recipe(self.read_body()))
@@ -1308,6 +1522,15 @@ class Handler(SimpleHTTPRequestHandler):
             if self.path.startswith("/api/jobs/") and self.path.endswith("/regenerate"):
                 job_id = self.path.split("/")[3]
                 self.send_json(regenerate_job(job_id))
+                return
+            self.send_json({"error": "not_found"}, 404)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, 500)
+
+    def do_DELETE(self) -> None:
+        try:
+            if self.path == "/api/civitai/config":
+                self.send_json(delete_civitai_config())
                 return
             self.send_json({"error": "not_found"}, 404)
         except Exception as exc:

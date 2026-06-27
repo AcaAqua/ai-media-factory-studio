@@ -11,6 +11,7 @@ let pendingRecipeId = "";
 let activeComparisonId = "";
 let boardAssets = [];
 let boardLoaded = false;
+let civitaiConfig = null;
 
 const FIELD_LABELS = {
   positive_prompt: "Positive Prompt",
@@ -42,6 +43,7 @@ async function api(path, options = {}) {
 
 async function load() {
   state = await api("/api/bootstrap");
+  await loadCivitaiConfig().catch(() => { civitaiConfig = null; });
   render();
 }
 
@@ -655,6 +657,95 @@ function renderModels() {
     return;
   }
   list.innerHTML = models.map((model) => `<span class="chip ok">${escapeHtml(model)}</span>`).join("");
+  renderCivitaiConfig();
+}
+
+async function loadCivitaiConfig() {
+  civitaiConfig = await api("/api/civitai/config");
+}
+
+function renderCivitaiConfig() {
+  const status = $("#civitaiKeyStatus");
+  if (!status) return;
+  const info = civitaiConfig?.civitai;
+  if (!info) {
+    status.textContent = "Civitai API Key状態を取得できませんでした。";
+    return;
+  }
+  const sourceLabels = { environment: "環境変数", local_config: "ローカル設定", none: "未設定" };
+  status.textContent = info.has_token
+    ? `設定済み (${sourceLabels[info.source] || info.source})。キー本体は表示しません。`
+    : "未設定。公開メタデータ確認は可能ですが、制限付きモデルではAPI Keyが必要になる場合があります。";
+}
+
+async function saveCivitaiKey(event) {
+  event.preventDefault();
+  const apiKey = $("#civitaiApiKey").value.trim();
+  if (!apiKey) {
+    alert("Civitai API Keyを入力してください。");
+    return;
+  }
+  civitaiConfig = await api("/api/civitai/config", { method: "POST", body: JSON.stringify({ api_token: apiKey }) });
+  $("#civitaiApiKey").value = "";
+  renderCivitaiConfig();
+  alert("Civitai API Keyをローカル設定に保存しました。");
+}
+
+async function deleteCivitaiKey() {
+  const confirmed = confirm("ローカル保存したCivitai API Keyを削除します。環境変数で設定されたキーは削除されません。");
+  if (!confirmed) return;
+  civitaiConfig = await api("/api/civitai/config", { method: "DELETE" });
+  renderCivitaiConfig();
+  alert("Civitai API Key設定を削除しました。");
+}
+
+async function testCivitaiKey() {
+  const result = await api("/api/civitai/lookup", { method: "POST", body: JSON.stringify({ url: "https://civitai.com/models/257749" }) });
+  const modelName = result.civitai?.model?.name || "metadata";
+  alert(`Civitai接続OK: ${modelName}`);
+}
+
+async function lookupCivitai(event) {
+  event.preventDefault();
+  const preview = $("#civitaiPreview");
+  const url = $("#civitaiUrl").value.trim();
+  if (!url) {
+    preview.innerHTML = `<div class="empty-state">Civitai URLを入力してください。</div>`;
+    return;
+  }
+  preview.innerHTML = `<div class="empty-state">Civitaiメタデータを取得しています...</div>`;
+  const result = await api("/api/civitai/lookup", { method: "POST", body: JSON.stringify({ url }) });
+  const item = result.civitai;
+  const model = item.model || {};
+  const version = item.version || {};
+  const files = version.files || [];
+  preview.innerHTML = `
+    <article class="civitai-card">
+      <header>
+        <strong>${escapeHtml(model.name || "名称未取得")}</strong>
+        <span class="chip ${model.nsfw ? "warn" : "ok"}">${escapeHtml(model.type || "type不明")}</span>
+      </header>
+      <dl class="info-list">
+        <dt>Creator</dt><dd>${escapeHtml(model.creator || "-")}</dd>
+        <dt>Version</dt><dd>${escapeHtml(`${version.name || "-"} / ${version.base_model || "base不明"}`)}</dd>
+        <dt>Trigger Words</dt><dd>${escapeHtml((version.trained_words || []).join(", ") || "-")}</dd>
+        <dt>Tags</dt><dd>${escapeHtml((model.tags || []).slice(0, 16).join(", ") || "-")}</dd>
+        <dt>Source</dt><dd><a href="${escapeHtml(item.source_url)}" target="_blank" rel="noreferrer">Civitaiを開く</a></dd>
+        <dt>Download</dt><dd><a href="${escapeHtml(version.download_url || "#")}" target="_blank" rel="noreferrer">download URLを開く</a></dd>
+      </dl>
+      <details>
+        <summary>Files ${files.length}件</summary>
+        <div class="file-list">
+          ${files.map((file) => `
+            <div>
+              <strong>${escapeHtml(file.name || "file")}</strong>
+              <span>${escapeHtml(`${file.type || "-"} / ${formatBytes((file.size_kb || 0) * 1024)} / pickle ${file.pickle_scan_result || "-"} / virus ${file.virus_scan_result || "-"}`)}</span>
+            </div>
+          `).join("") || `<p class="note">ファイル情報なし</p>`}
+        </div>
+      </details>
+    </article>
+  `;
 }
 
 function renderSettings() {
@@ -734,6 +825,20 @@ async function resyncJobs() {
   const completed = (result.results || []).filter((item) => item.status === "completed").length;
   const failed = (result.results || []).filter((item) => item.ok === false || item.status === "failed").length;
   alert(`再同期: 対象 ${result.requested}件 / completed ${completed}件 / failed ${failed}件`);
+}
+
+async function shutdownStudio() {
+  const confirmed = confirm("AI Media Factory Studioを停止します。停止後はデスクトップの起動アイコンから再開してください。");
+  if (!confirmed) return;
+  await api("/api/shutdown", { method: "POST", body: "{}" });
+  document.body.innerHTML = `
+    <main class="shutdown-screen">
+      <section class="surface">
+        <h1>AI Media Factory Studioを停止しました</h1>
+        <p>再開するときは、デスクトップの起動アイコンをダブルクリックしてください。</p>
+      </section>
+    </main>
+  `;
 }
 
 function renderStorage() {
@@ -1273,6 +1378,12 @@ document.addEventListener("change", (event) => {
 });
 
 $("#generateForm").addEventListener("submit", (event) => submitGeneration(event).catch((error) => alert(error.message)));
+$("#civitaiKeyForm").addEventListener("submit", (event) => saveCivitaiKey(event).catch((error) => alert(error.message)));
+$("#testCivitaiKey").addEventListener("click", () => testCivitaiKey().catch((error) => alert(error.message)));
+$("#deleteCivitaiKey").addEventListener("click", () => deleteCivitaiKey().catch((error) => alert(error.message)));
+$("#civitaiLookupForm").addEventListener("submit", (event) => lookupCivitai(event).catch((error) => {
+  $("#civitaiPreview").innerHTML = `<div class="empty-state">取得できませんでした: ${escapeHtml(error.message)}</div>`;
+}));
 $("#refreshButton").addEventListener("click", async () => {
   await api("/api/jobs/poll", { method: "POST", body: "{}" }).catch(() => null);
   await load();
@@ -1307,6 +1418,7 @@ $("#openCompare").addEventListener("click", openCompareView);
 $("#closeCompare").addEventListener("click", closeCompareView);
 $("#saveCompare").addEventListener("click", () => saveComparisonSet().catch((error) => alert(error.message)));
 $("#resyncJobs").addEventListener("click", () => resyncJobs().catch((error) => alert(error.message)));
+$("#shutdownStudio").addEventListener("click", () => shutdownStudio().catch((error) => alert(error.message)));
 $("#openStorageDialog").addEventListener("click", () => openStorageDialog("general"));
 $("#detectMapping").addEventListener("click", () => detectMapping().catch((error) => alert(error.message)));
 $("#saveMapping").addEventListener("click", () => saveMapping().catch((error) => alert(error.message)));

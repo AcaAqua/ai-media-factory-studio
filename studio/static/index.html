@@ -193,6 +193,35 @@
             <div class="section-head"><h2>モデル状態</h2></div>
             <div id="modelList" class="model-list"></div>
           </div>
+          <div class="surface">
+            <div class="section-head"><h2>Civitai連携</h2></div>
+            <div class="civitai-config">
+              <div>
+                <strong>API Key</strong>
+                <p class="note" id="civitaiKeyStatus">未確認</p>
+              </div>
+              <form class="inline-form" id="civitaiKeyForm">
+                <label class="field">
+                  <span>API Key</span>
+                  <input id="civitaiApiKey" type="password" autocomplete="off" placeholder="Civitai API Key">
+                </label>
+                <button type="submit">保存</button>
+              </form>
+              <div class="action-row">
+                <button class="secondary" type="button" id="testCivitaiKey">接続テスト</button>
+                <button class="danger" type="button" id="deleteCivitaiKey">キー削除</button>
+              </div>
+            </div>
+            <form class="inline-form" id="civitaiLookupForm">
+              <label class="field">
+                <span>Civitai URL</span>
+                <input id="civitaiUrl" placeholder="https://civitai.com/models/...">
+              </label>
+              <button type="submit">メタデータ確認</button>
+            </form>
+            <p class="note">この段階ではメタデータ確認のみ行います。モデル/LoRAファイルのダウンロード、移動、DB登録は行いません。</p>
+            <div id="civitaiPreview" class="civitai-preview"></div>
+          </div>
         </section>
 
         <section class="view" id="view-updates">
@@ -231,6 +260,10 @@
                 <dt>License</dt><dd>Apache License 2.0</dd>
                 <dt>Notice</dt><dd>Local-first tool for ComfyUI &amp; Ollama. Third-party models and assets are managed by the user.</dd>
               </dl>
+              <div class="action-row">
+                <button class="danger" type="button" id="shutdownStudio">Studioを停止</button>
+              </div>
+              <p class="note">停止すると、このブラウザ画面は再読み込みできなくなります。再開はデスクトップの起動アイコンから行います。</p>
             </div>
           </div>
         </section>

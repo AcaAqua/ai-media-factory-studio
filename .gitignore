@@ -39,6 +39,7 @@ docs/*
 !docs/
 !docs/README.md
 !docs/architecture.md
+!docs/roadmap.md
 !docs/setup-guide.md
 !docs/privacy-and-local-data.md
 !docs/release-process.md

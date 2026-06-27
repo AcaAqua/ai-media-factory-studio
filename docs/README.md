@@ -5,6 +5,7 @@ This directory contains public-facing documentation for AI Media Factory Studio.
 Public documents:
 
 - `architecture.md`
+- `roadmap.md`
 - `setup-guide.md`
 - `privacy-and-local-data.md`
 - `release-process.md`
