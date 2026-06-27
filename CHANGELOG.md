@@ -3,6 +3,7 @@
 ## v0.2.0-dev - Unreleased
 
 - Added local setup status API and Settings panel for launcher, database, storage, and asset registry readiness.
+- Added first-run setup checklist with required/optional readiness steps and persistent complete/dismiss controls.
 - Added manual SQLite database backup action from the Settings screen.
 - Added guarded database backup listing and restore UI with pre-restore backup creation and explicit confirmation.
 - Improved `scripts/start_studio.ps1` to reuse an already running Studio server or start it in the background and open the browser.

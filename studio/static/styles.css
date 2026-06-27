@@ -279,7 +279,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   gap: 8px;
   margin-top: 10px;
 }
-.comparison-card, .storage-card, .diagnostic-card, .civitai-card, .asset-registry-card {
+.comparison-card, .storage-card, .diagnostic-card, .civitai-card, .asset-registry-card, .setup-step {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #101416;
@@ -287,7 +287,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   display: grid;
   gap: 8px;
 }
-.comparison-card header, .storage-card header, .diagnostic-card header, .civitai-card header, .asset-registry-card header {
+.comparison-card header, .storage-card header, .diagnostic-card header, .civitai-card header, .asset-registry-card header, .setup-step header {
   display: flex;
   justify-content: space-between;
   gap: 8px;
@@ -371,6 +371,27 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   display: grid;
   gap: 10px;
 }
+.setup-wizard {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(255, 255, 255, .02);
+}
+.setup-wizard summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: 700;
+}
+.setup-step-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+.setup-step.warn { border-color: rgba(245, 158, 11, .35); }
+.setup-step.info { border-color: rgba(96, 165, 250, .28); }
 .diagnostic-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

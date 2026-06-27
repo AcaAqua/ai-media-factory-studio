@@ -103,12 +103,13 @@ http://127.0.0.1:8765/
 1. Start ComfyUI separately.
 2. Open Studio.
 3. Confirm ComfyUI and Ollama connection status in Settings.
-4. Review the Local Setup panel in Settings.
-5. Create a manual DB backup from Settings before larger operational changes.
-6. Use the guarded DB restore dialog only when you intentionally want to replace the current local database with a selected backup.
-7. Register or scan workflows.
-8. Open Workflow input mapping and save mappings before real generation.
-9. Configure Adult Local storage only if the directory is inside the ComfyUI output root.
+4. Review the Local Setup checklist in Settings.
+5. Complete or dismiss the setup checklist when the required local checks are ready.
+6. Create a manual DB backup from Settings before larger operational changes.
+7. Use the guarded DB restore dialog only when you intentionally want to replace the current local database with a selected backup.
+8. Register or scan workflows.
+9. Open Workflow input mapping and save mappings before real generation.
+10. Configure Adult Local storage only if the directory is inside the ComfyUI output root.
 
 ## Roadmap
 

@@ -1290,6 +1290,53 @@ async function loadSetupStatus() {
   setupStatus = await api("/api/setup/status");
 }
 
+function setupActionLabel(action) {
+  return {
+    backup: "バックアップ作成",
+    storage: "保存先を確認",
+    models: "資産台帳へ",
+    workflow_scan: "不足検知",
+    settings: "設定を確認",
+    launcher: "起動情報",
+  }[action] || "確認";
+}
+
+function renderSetupWizard(setup) {
+  const steps = setup.steps || [];
+  const required = steps.filter((step) => step.required);
+  const requiredOk = required.length && required.every((step) => step.status === "ok");
+  const prefs = setup.preferences || {};
+  const collapsed = prefs.dismissed || prefs.completed;
+  return `
+    <details class="setup-wizard" ${collapsed ? "" : "open"}>
+      <summary>
+        <span>初回セットアップ</span>
+        <span class="chip ${requiredOk ? "ok" : "warn"}">${requiredOk ? "必須OK" : "要確認"}</span>
+        ${prefs.completed ? `<span class="chip ok">完了済み</span>` : ""}
+      </summary>
+      <div class="setup-step-list">
+        ${steps.map((step) => `
+          <article class="setup-step ${escapeHtml(step.status)}">
+            <header>
+              <strong>${escapeHtml(step.label)}</strong>
+              <span class="chip ${escapeHtml(step.status)}">${escapeHtml(step.status)}</span>
+            </header>
+            <p>${escapeHtml(step.detail || "-")}</p>
+            <div class="action-row">
+              <button class="secondary" type="button" data-setup-action="${escapeHtml(step.action || "")}">${escapeHtml(setupActionLabel(step.action))}</button>
+            </div>
+          </article>
+        `).join("")}
+      </div>
+      <div class="action-row">
+        <button type="button" data-setup-state="completed">セットアップ完了</button>
+        <button class="secondary" type="button" data-setup-state="dismissed">後で表示しない</button>
+        ${(prefs.completed || prefs.dismissed) ? `<button class="secondary" type="button" data-setup-state="reset">再表示</button>` : ""}
+      </div>
+    </details>
+  `;
+}
+
 function renderSetupStatus() {
   const panel = $("#setupStatusPanel");
   if (!panel) return;
@@ -1306,6 +1353,7 @@ function renderSetupStatus() {
     .map((item) => `${assetKindLabel(item.asset_kind)} ${item.count}`)
     .join(" / ");
   panel.innerHTML = `
+    ${renderSetupWizard(setup)}
     <div class="diagnostic-grid">
       ${diagnosticCard("起動", [
         `Launcher ${setup.launcher.exists ? "OK" : "未作成"}`,
@@ -1342,6 +1390,38 @@ async function createDatabaseBackup() {
   renderSetupStatus();
   await load();
   alert(`DBバックアップを作成しました。\n${result.relative_path}\n${formatBytes(result.size_bytes)}`);
+}
+
+async function saveSetupWizardState(mode) {
+  const payload = mode === "reset"
+    ? { completed: false, dismissed: false }
+    : { [mode]: true };
+  setupStatus = await api("/api/setup/state", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  renderSetupStatus();
+}
+
+async function runSetupAction(action) {
+  if (action === "backup") {
+    await createDatabaseBackup();
+    return;
+  }
+  if (action === "storage" || action === "settings" || action === "launcher") {
+    switchView("settings");
+    return;
+  }
+  if (action === "models") {
+    switchView("models");
+    return;
+  }
+  if (action === "workflow_scan") {
+    switchView("models");
+    await scanWorkflowRequirements();
+    await loadSetupStatus();
+    renderSetupStatus();
+  }
 }
 
 async function openDatabaseRestoreDialog() {
@@ -2016,6 +2096,10 @@ document.addEventListener("click", (event) => {
   if (applyCivitaiButton) applyCivitaiToAsset().catch((error) => alert(error.message));
   const openRestoreButton = event.target.closest("#openDatabaseRestoreDialog");
   if (openRestoreButton) openDatabaseRestoreDialog().catch((error) => alert(error.message));
+  const setupActionButton = event.target.closest("[data-setup-action]");
+  if (setupActionButton) runSetupAction(setupActionButton.dataset.setupAction).catch((error) => alert(error.message));
+  const setupStateButton = event.target.closest("[data-setup-state]");
+  if (setupStateButton) saveSetupWizardState(setupStateButton.dataset.setupState).catch((error) => alert(error.message));
 });
 
 document.addEventListener("change", (event) => {

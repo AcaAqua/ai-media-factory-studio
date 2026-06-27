@@ -1819,16 +1819,100 @@ def setup_status() -> dict[str, Any]:
         asset_locations = rows(con, "SELECT asset_kind, COUNT(*) AS count FROM asset_registry_locations WHERE is_enabled = 1 GROUP BY asset_kind")
         asset_items = rows(con, "SELECT asset_kind, COUNT(*) AS count FROM asset_registry_items WHERE missing = 0 GROUP BY asset_kind")
         workflow_requirements = rows(con, "SELECT status, asset_kind, COUNT(*) AS count FROM workflow_asset_requirements GROUP BY status, asset_kind")
+        backups = list_database_backups()["backups"]
+        setup_preferences = get_setting(con, "setup_wizard", {"completed": False, "dismissed": False})
+        storage_ready = sum(1 for item in storage if item.get("path_exists") and item.get("writable"))
+        storage_issues = [
+            {
+                "name": item["name"],
+                "content_scope": item.get("content_scope"),
+                "validation": item.get("last_validation_result"),
+            }
+            for item in storage
+            if item.get("is_enabled") and (not item.get("path_exists") or not item.get("writable"))
+        ]
+        missing_requirements = sum(int(item["count"]) for item in workflow_requirements if item["status"] == "missing")
+        detected_requirements = sum(int(item["count"]) for item in workflow_requirements)
+        civitai = civitai_config_status()["civitai"]
+        steps = [
+            {
+                "key": "launcher",
+                "label": "Studio起動",
+                "status": "ok" if launcher.exists() else "warn",
+                "detail": "起動スクリプトを確認済み" if launcher.exists() else "起動スクリプトが見つかりません",
+                "required": True,
+                "action": "launcher",
+            },
+            {
+                "key": "comfyui",
+                "label": "ComfyUI接続",
+                "status": "ok" if connections.get("comfyui", {}).get("ok") else "warn",
+                "detail": connections.get("comfyui", {}).get("detail") or connections.get("comfyui", {}).get("endpoint"),
+                "required": True,
+                "action": "settings",
+            },
+            {
+                "key": "ollama",
+                "label": "Ollama接続",
+                "status": "ok" if connections.get("ollama", {}).get("ok") else "warn",
+                "detail": connections.get("ollama", {}).get("detail") or connections.get("ollama", {}).get("endpoint"),
+                "required": False,
+                "action": "settings",
+            },
+            {
+                "key": "database_backup",
+                "label": "DBバックアップ",
+                "status": "ok" if backups else "warn",
+                "detail": f"{len(backups)} backup(s)",
+                "required": True,
+                "action": "backup",
+            },
+            {
+                "key": "storage",
+                "label": "保存先",
+                "status": "ok" if storage_ready and not storage_issues else "warn",
+                "detail": f"ready {storage_ready} / {len(storage)}",
+                "required": True,
+                "action": "storage",
+            },
+            {
+                "key": "asset_registry",
+                "label": "資産台帳",
+                "status": "ok" if asset_items else "warn",
+                "detail": f"{sum(int(item['count']) for item in asset_items)} item(s)",
+                "required": True,
+                "action": "models",
+            },
+            {
+                "key": "workflow_requirements",
+                "label": "Workflow必要資産",
+                "status": "ok" if detected_requirements and not missing_requirements else "warn",
+                "detail": f"detected {detected_requirements}, missing {missing_requirements}",
+                "required": False,
+                "action": "workflow_scan",
+            },
+            {
+                "key": "civitai",
+                "label": "Civitai API Key",
+                "status": "ok" if civitai.get("has_token") else "info",
+                "detail": civitai.get("source") or "none",
+                "required": False,
+                "action": "models",
+            },
+        ]
         return {
             "ok": True,
             "setup": {
                 "version": APP_VERSION,
                 "local_first": True,
+                "preferences": setup_preferences,
+                "steps": steps,
                 "database": {
                     "exists": DB_PATH.exists(),
                     "path": str(DB_PATH),
                     "size_bytes": DB_PATH.stat().st_size if DB_PATH.exists() else 0,
                     "backup_dir": str(DATA / "backups"),
+                    "backup_count": len(backups),
                 },
                 "launcher": {
                     "script": str(launcher),
@@ -1838,16 +1922,8 @@ def setup_status() -> dict[str, Any]:
                 "connections": connections,
                 "storage": {
                     "total": len(storage),
-                    "ready": sum(1 for item in storage if item.get("path_exists") and item.get("writable")),
-                    "issues": [
-                        {
-                            "name": item["name"],
-                            "content_scope": item.get("content_scope"),
-                            "validation": item.get("last_validation_result"),
-                        }
-                        for item in storage
-                        if item.get("is_enabled") and (not item.get("path_exists") or not item.get("writable"))
-                    ],
+                    "ready": storage_ready,
+                    "issues": storage_issues,
                 },
                 "asset_registry": {
                     "locations": asset_locations,
@@ -1856,6 +1932,19 @@ def setup_status() -> dict[str, Any]:
                 },
             },
         }
+
+
+def save_setup_wizard_state(payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"completed", "dismissed"}
+    state = {key: bool(payload.get(key)) for key in allowed if key in payload}
+    with db() as con:
+        current = get_setting(con, "setup_wizard", {"completed": False, "dismissed": False})
+        if not isinstance(current, dict):
+            current = {"completed": False, "dismissed": False}
+        current.update(state)
+        current["updated_at"] = now_iso()
+        set_setting(con, "setup_wizard", current)
+    return setup_status()
 
 
 def normalize_prompt_tag(value: str) -> str:
@@ -2436,6 +2525,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if self.path == "/api/database/restore":
                 self.send_json(restore_database_backup(self.read_body()))
+                return
+            if self.path == "/api/setup/state":
+                self.send_json(save_setup_wizard_state(self.read_body()))
                 return
             if self.path == "/api/civitai/lookup":
                 self.send_json(lookup_civitai_model(self.read_body()))
