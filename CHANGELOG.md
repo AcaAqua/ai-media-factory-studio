@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.0-dev - Unreleased
+
+- Added local setup status API and Settings panel for launcher, database, storage, and asset registry readiness.
+- Added manual SQLite database backup action from the Settings screen.
+- Improved `scripts/start_studio.ps1` to reuse an already running Studio server or start it in the background and open the browser.
+
 ## v0.1.9 - 2026-06-27
 
 - Added initial Studio asset registry tables for model, LoRA, VAE, ControlNet, upscaler, and workflow locations.

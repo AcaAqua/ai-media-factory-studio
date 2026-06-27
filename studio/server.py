@@ -22,7 +22,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
-APP_VERSION = "0.1.9"
+APP_VERSION = "0.2.0-dev"
 ROOT = Path(__file__).resolve().parents[1]
 STUDIO = ROOT / "studio"
 STATIC = STUDIO / "static"
@@ -109,6 +109,27 @@ def db() -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     return con
+
+
+def create_database_backup(reason: str = "manual") -> dict[str, Any]:
+    if not DB_PATH.exists():
+        raise ValueError("database file does not exist")
+    DATA.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_dir = DATA / "backups" / f"{safe_slug(reason, 40)}-{stamp}"
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    backup_path = backup_dir / DB_PATH.name
+    with sqlite3.connect(DB_PATH) as source:
+        with sqlite3.connect(backup_path) as target:
+            source.backup(target)
+    return {
+        "ok": True,
+        "reason": reason,
+        "path": str(backup_path),
+        "relative_path": backup_path.relative_to(ROOT).as_posix(),
+        "size_bytes": backup_path.stat().st_size,
+        "created_at": now_iso(),
+    }
 
 
 def run_migrations() -> None:
@@ -1731,6 +1752,57 @@ def diagnostics() -> dict[str, Any]:
         return {"ok": True, "diagnostics": diagnostics_summary(con)}
 
 
+def setup_status() -> dict[str, Any]:
+    launcher = ROOT / "scripts" / "start_studio.ps1"
+    with db() as con:
+        connections = connection_state(con)
+        output_root = configured_comfy_output_root(con)
+        storage = [
+            storage_status(item, output_root)
+            for item in rows(con, "SELECT * FROM storage_locations ORDER BY content_scope, is_default DESC, name")
+        ]
+        asset_locations = rows(con, "SELECT asset_kind, COUNT(*) AS count FROM asset_registry_locations WHERE is_enabled = 1 GROUP BY asset_kind")
+        asset_items = rows(con, "SELECT asset_kind, COUNT(*) AS count FROM asset_registry_items WHERE missing = 0 GROUP BY asset_kind")
+        workflow_requirements = rows(con, "SELECT status, asset_kind, COUNT(*) AS count FROM workflow_asset_requirements GROUP BY status, asset_kind")
+        return {
+            "ok": True,
+            "setup": {
+                "version": APP_VERSION,
+                "local_first": True,
+                "database": {
+                    "exists": DB_PATH.exists(),
+                    "path": str(DB_PATH),
+                    "size_bytes": DB_PATH.stat().st_size if DB_PATH.exists() else 0,
+                    "backup_dir": str(DATA / "backups"),
+                },
+                "launcher": {
+                    "script": str(launcher),
+                    "exists": launcher.exists(),
+                    "url": "http://127.0.0.1:8765/",
+                },
+                "connections": connections,
+                "storage": {
+                    "total": len(storage),
+                    "ready": sum(1 for item in storage if item.get("path_exists") and item.get("writable")),
+                    "issues": [
+                        {
+                            "name": item["name"],
+                            "content_scope": item.get("content_scope"),
+                            "validation": item.get("last_validation_result"),
+                        }
+                        for item in storage
+                        if item.get("is_enabled") and (not item.get("path_exists") or not item.get("writable"))
+                    ],
+                },
+                "asset_registry": {
+                    "locations": asset_locations,
+                    "items": asset_items,
+                    "workflow_requirements": workflow_requirements,
+                },
+            },
+        }
+
+
 def normalize_prompt_tag(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip())
 
@@ -2224,6 +2296,9 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/api/diagnostics":
             self.send_json(diagnostics())
             return
+        if self.path == "/api/setup/status":
+            self.send_json(setup_status())
+            return
         if self.path == "/api/prompt-translation":
             self.send_json(prompt_translation_state())
             return
@@ -2295,6 +2370,11 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if self.path == "/api/jobs/resync":
                 self.send_json(resync_generation_jobs(self.read_body()))
+                return
+            if self.path == "/api/database/backup":
+                payload = self.read_body()
+                reason = str(payload.get("reason") or "manual")
+                self.send_json(create_database_backup(reason))
                 return
             if self.path == "/api/civitai/lookup":
                 self.send_json(lookup_civitai_model(self.read_body()))

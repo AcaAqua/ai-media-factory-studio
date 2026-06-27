@@ -14,6 +14,7 @@ let boardLoaded = false;
 let civitaiConfig = null;
 let promptTranslation = { terms: [], presets: [], history: [], last: null };
 let assetRegistry = { locations: [], items: [], scan_runs: [] };
+let setupStatus = null;
 let activeAssetRegistryItem = null;
 let lastCivitaiLookup = null;
 
@@ -54,6 +55,7 @@ async function load() {
   };
   assetRegistry = state.asset_registry || assetRegistry;
   await loadCivitaiConfig().catch(() => { civitaiConfig = null; });
+  await loadSetupStatus().catch(() => { setupStatus = null; });
   render();
 }
 
@@ -1280,6 +1282,62 @@ function renderSettings() {
     <dt>Git</dt><dd>${escapeHtml(state.git.output || "no output")}</dd>
     <dt>Adult Local保存先</dt><dd>${escapeHtml(adultStorage.label)}</dd>
   `;
+  renderSetupStatus();
+}
+
+async function loadSetupStatus() {
+  setupStatus = await api("/api/setup/status");
+}
+
+function renderSetupStatus() {
+  const panel = $("#setupStatusPanel");
+  if (!panel) return;
+  const setup = setupStatus?.setup;
+  if (!setup) {
+    panel.innerHTML = `<div class="empty-state">セットアップ状態を取得できませんでした。</div>`;
+    return;
+  }
+  const requirements = setup.asset_registry?.workflow_requirements || [];
+  const missingCount = requirements
+    .filter((item) => item.status === "missing")
+    .reduce((total, item) => total + Number(item.count || 0), 0);
+  const assetCounts = (setup.asset_registry?.items || [])
+    .map((item) => `${assetKindLabel(item.asset_kind)} ${item.count}`)
+    .join(" / ");
+  panel.innerHTML = `
+    <div class="diagnostic-grid">
+      ${diagnosticCard("起動", [
+        `Launcher ${setup.launcher.exists ? "OK" : "未作成"}`,
+        setup.launcher.url,
+      ], setup.launcher.exists ? "ok" : "warn")}
+      ${diagnosticCard("DBバックアップ", [
+        formatBytes(setup.database.size_bytes),
+        setup.database.backup_dir,
+      ], setup.database.exists ? "ok" : "bad")}
+      ${diagnosticCard("保存先", [
+        `ready ${setup.storage.ready} / ${setup.storage.total}`,
+        `issues ${(setup.storage.issues || []).length}`,
+      ], (setup.storage.issues || []).length ? "warn" : "ok")}
+      ${diagnosticCard("資産台帳", [
+        assetCounts || "未スキャン",
+        `Workflow不足 ${missingCount}`,
+      ], missingCount ? "warn" : "ok")}
+    </div>
+    <div class="diagnostic-notes">
+      <p>ローカル配布に向けた最小セットアップ状態です。DBバックアップは ` + "`studio/data/backups/`" + ` に作成され、Git公開対象には含まれません。</p>
+    </div>
+  `;
+}
+
+async function createDatabaseBackup() {
+  const result = await api("/api/database/backup", {
+    method: "POST",
+    body: JSON.stringify({ reason: "manual-ui" }),
+  });
+  await loadSetupStatus();
+  renderSetupStatus();
+  await load();
+  alert(`DBバックアップを作成しました。\n${result.relative_path}\n${formatBytes(result.size_bytes)}`);
 }
 
 function renderDiagnostics() {
@@ -1959,6 +2017,7 @@ $("#openCompare").addEventListener("click", openCompareView);
 $("#closeCompare").addEventListener("click", closeCompareView);
 $("#saveCompare").addEventListener("click", () => saveComparisonSet().catch((error) => alert(error.message)));
 $("#resyncJobs").addEventListener("click", () => resyncJobs().catch((error) => alert(error.message)));
+$("#createDbBackup").addEventListener("click", () => createDatabaseBackup().catch((error) => alert(error.message)));
 $("#shutdownStudio").addEventListener("click", () => shutdownStudio().catch((error) => alert(error.message)));
 $("#openStorageDialog").addEventListener("click", () => openStorageDialog("general"));
 $("#detectMapping").addEventListener("click", () => detectMapping().catch((error) => alert(error.message)));
