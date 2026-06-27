@@ -536,6 +536,21 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   gap: 8px;
 }
 .panel-action { text-align: left; }
+.prompt-translation-panel textarea {
+  min-height: 68px;
+  font-size: 12px;
+}
+.field-label {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 .dock-panel.minimized .panel-body { display: none; }
 .dock-panel.minimized h2 { font-size: 0; }
 .dock-panel.minimized h2::before { content: attr(data-icon); font-size: 18px; }
@@ -672,10 +687,54 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   background: var(--panel);
   color: var(--text);
 }
+.wide-dialog {
+  width: min(760px, calc(100vw - 28px));
+}
 .recipe-dialog::backdrop { background: rgba(0, 0, 0, .58); }
 .recipe-dialog form {
   display: grid;
   gap: 12px;
+}
+.term-list,
+.history-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(58vh, 540px);
+  overflow: auto;
+}
+.term-row,
+.history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #14191b;
+  padding: 10px;
+}
+.term-row.disabled {
+  opacity: .58;
+}
+.term-row p,
+.history-row p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.term-actions {
+  display: grid;
+  gap: 6px;
+}
+.term-actions button,
+.history-row button {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  min-height: 34px;
+  color: var(--text);
+  background: var(--panel-2);
+  padding: 0 12px;
 }
 .settings-grid {
   display: grid;

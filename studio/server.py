@@ -22,7 +22,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
-APP_VERSION = "0.1.7"
+APP_VERSION = "0.1.8"
 ROOT = Path(__file__).resolve().parents[1]
 STUDIO = ROOT / "studio"
 STATIC = STUDIO / "static"
@@ -43,6 +43,8 @@ CONTENT_SCOPES = {"sfw", "sensitive", "adult_local"}
 STORAGE_SCOPES = {"general", "sensitive", "adult_local"}
 STORAGE_USAGE_TYPES = {"generated", "references", "exports", "thumbnails", "backups"}
 LOCAL_SHUTDOWN_HOSTS = {"127.0.0.1", "::1", "localhost"}
+PROMPT_SPLIT_RE = re.compile(r"[、，,。．.\n\r\t\s]+")
+PROMPT_PARTICLE_RE = re.compile(r"^[のにをがはでとへやも]|[のにをがはでとへやも]$")
 
 
 def now_iso() -> str:
@@ -1281,6 +1283,302 @@ def diagnostics() -> dict[str, Any]:
         return {"ok": True, "diagnostics": diagnostics_summary(con)}
 
 
+def normalize_prompt_tag(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip())
+
+
+def split_prompt_tags(value: str) -> list[str]:
+    tags = []
+    for item in re.split(r"[,、\n\r]+", value or ""):
+        tag = normalize_prompt_tag(item)
+        if tag:
+            tags.append(tag)
+    return tags
+
+
+def dedupe_prompt_tags(tags: list[str]) -> list[str]:
+    normalized = []
+    seen = set()
+    for item in tags:
+        tag = normalize_prompt_tag(item)
+        key = tag.lower()
+        if tag and key not in seen:
+            normalized.append(tag)
+            seen.add(key)
+    return normalized
+
+
+def cleanup_unconverted_token(value: str) -> str:
+    token = PROMPT_PARTICLE_RE.sub("", value.strip())
+    token = PROMPT_PARTICLE_RE.sub("", token)
+    return token.strip()
+
+
+def convert_prompt_text(text: str, terms: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    working = str(text or "")
+    tags: list[str] = []
+    ordered_terms = sorted(
+        [term for term in terms if term.get("is_enabled") and term.get("source_text") and term.get("target_text")],
+        key=lambda term: (len(str(term["source_text"])), int(term.get("weight") or 0)),
+        reverse=True,
+    )
+    for term in ordered_terms:
+        source = str(term["source_text"]).strip()
+        if source and source in working:
+            tags.extend(split_prompt_tags(str(term["target_text"])))
+            working = working.replace(source, " ")
+    unconverted = []
+    seen_unconverted = set()
+    for raw in PROMPT_SPLIT_RE.split(working):
+        token = cleanup_unconverted_token(raw)
+        if token and token not in seen_unconverted:
+            unconverted.append(token)
+            seen_unconverted.add(token)
+    return dedupe_prompt_tags(tags), unconverted
+
+
+def list_prompt_translation_terms(query: str = "") -> list[dict[str, Any]]:
+    params: tuple[Any, ...] = ()
+    where = ""
+    if query:
+        where = "WHERE source_text LIKE ? OR target_text LIKE ? OR category LIKE ?"
+        like = f"%{query}%"
+        params = (like, like, like)
+    with db() as con:
+        return rows(
+            con,
+            f"""
+            SELECT * FROM prompt_translation_terms
+            {where}
+            ORDER BY is_enabled DESC, category, length(source_text) DESC, source_text
+            """,
+            params,
+        )
+
+
+def list_prompt_translation_presets(enabled_only: bool = False) -> list[dict[str, Any]]:
+    where = "WHERE is_enabled = 1" if enabled_only else ""
+    with db() as con:
+        return rows(
+            con,
+            f"""
+            SELECT * FROM prompt_translation_presets
+            {where}
+            ORDER BY is_default DESC, name
+            """,
+        )
+
+
+def list_prompt_translation_history(limit: int = 50) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(int(limit or 50), 200))
+    with db() as con:
+        history = rows(
+            con,
+            """
+            SELECT h.*, p.name AS preset_name
+            FROM prompt_translation_history h
+            LEFT JOIN prompt_translation_presets p ON p.preset_id = h.preset_id
+            ORDER BY h.created_at DESC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        )
+    for item in history:
+        try:
+            item["unconverted_terms"] = json.loads(item.get("unconverted_terms_json") or "[]")
+        except json.JSONDecodeError:
+            item["unconverted_terms"] = []
+    return history
+
+
+def prompt_translation_state() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "terms": list_prompt_translation_terms(),
+        "presets": list_prompt_translation_presets(),
+        "history": list_prompt_translation_history(30),
+    }
+
+
+def get_prompt_translation_preset(con: sqlite3.Connection, preset_id: str | None) -> dict[str, Any] | None:
+    if preset_id:
+        preset = row(con, "SELECT * FROM prompt_translation_presets WHERE preset_id = ? AND is_enabled = 1", (preset_id,))
+        if preset:
+            return preset
+    return row(con, "SELECT * FROM prompt_translation_presets WHERE is_default = 1 AND is_enabled = 1 ORDER BY name LIMIT 1")
+
+
+def convert_prompt_translation(payload: dict[str, Any]) -> dict[str, Any]:
+    source_prompt = str(payload.get("source_prompt") or "")
+    source_negative = str(payload.get("source_negative") or "")
+    preset_id = str(payload.get("preset_id") or "").strip() or None
+    with db() as con:
+        terms = rows(con, "SELECT * FROM prompt_translation_terms WHERE is_enabled = 1")
+        preset = get_prompt_translation_preset(con, preset_id)
+        prompt_tags, prompt_unconverted = convert_prompt_text(source_prompt, terms)
+        negative_tags, negative_unconverted = convert_prompt_text(source_negative, terms)
+        if preset:
+            prompt_tags.extend(split_prompt_tags(preset.get("append_prompt") or ""))
+            negative_tags.extend(split_prompt_tags(preset.get("append_negative") or ""))
+            preset_id = preset["preset_id"]
+        translated_prompt = ", ".join(dedupe_prompt_tags(prompt_tags))
+        translated_negative = ", ".join(dedupe_prompt_tags(negative_tags))
+        unconverted = []
+        for item in prompt_unconverted + negative_unconverted:
+            if item not in unconverted:
+                unconverted.append(item)
+        history_id = new_id("pth")
+        con.execute(
+            """
+            INSERT INTO prompt_translation_history
+              (history_id, source_prompt, translated_prompt, source_negative, translated_negative, unconverted_terms_json, preset_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                history_id,
+                source_prompt,
+                translated_prompt,
+                source_negative,
+                translated_negative,
+                json.dumps(unconverted, ensure_ascii=False),
+                preset_id,
+            ),
+        )
+    return {
+        "ok": True,
+        "result": {
+            "history_id": history_id,
+            "source_prompt": source_prompt,
+            "translated_prompt": translated_prompt,
+            "source_negative": source_negative,
+            "translated_negative": translated_negative,
+            "unconverted_terms": unconverted,
+            "preset_id": preset_id,
+        },
+    }
+
+
+def create_prompt_translation_term(payload: dict[str, Any]) -> dict[str, Any]:
+    source_text = str(payload.get("source_text") or "").strip()
+    target_text = str(payload.get("target_text") or "").strip()
+    if not source_text or not target_text:
+        raise ValueError("source_text and target_text are required")
+    category = str(payload.get("category") or "general").strip() or "general"
+    weight = int(payload.get("weight") or 0)
+    is_enabled = 1 if payload.get("is_enabled", True) else 0
+    term_id = payload.get("term_id") or new_id("ptm")
+    with db() as con:
+        con.execute(
+            """
+            INSERT INTO prompt_translation_terms
+              (term_id, source_text, target_text, category, weight, is_enabled, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(source_text) DO UPDATE SET
+              target_text = excluded.target_text,
+              category = excluded.category,
+              weight = excluded.weight,
+              is_enabled = excluded.is_enabled,
+              updated_at = datetime('now')
+            """,
+            (term_id, source_text, target_text, category, weight, is_enabled),
+        )
+        saved = row(con, "SELECT * FROM prompt_translation_terms WHERE source_text = ?", (source_text,))
+    return {"ok": True, "term": saved}
+
+
+def update_prompt_translation_term(term_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"source_text", "target_text", "category", "weight", "is_enabled"}
+    updates = []
+    params: list[Any] = []
+    for key in allowed:
+        if key not in payload:
+            continue
+        value = payload[key]
+        if key in {"source_text", "target_text", "category"}:
+            value = str(value or "").strip()
+            if key in {"source_text", "target_text"} and not value:
+                raise ValueError(f"{key} is required")
+        if key == "weight":
+            value = int(value or 0)
+        if key == "is_enabled":
+            value = 1 if value else 0
+        updates.append(f"{key} = ?")
+        params.append(value)
+    if not updates:
+        raise ValueError("no fields to update")
+    params.append(term_id)
+    with db() as con:
+        con.execute(
+            f"UPDATE prompt_translation_terms SET {', '.join(updates)}, updated_at = datetime('now') WHERE term_id = ?",
+            tuple(params),
+        )
+        saved = row(con, "SELECT * FROM prompt_translation_terms WHERE term_id = ?", (term_id,))
+    if not saved:
+        raise ValueError("term not found")
+    return {"ok": True, "term": saved}
+
+
+def create_prompt_translation_preset(payload: dict[str, Any]) -> dict[str, Any]:
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        raise ValueError("name is required")
+    preset_id = payload.get("preset_id") or new_id("pts")
+    with db() as con:
+        con.execute(
+            """
+            INSERT INTO prompt_translation_presets
+              (preset_id, name, append_prompt, append_negative, is_default, is_enabled, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(name) DO UPDATE SET
+              append_prompt = excluded.append_prompt,
+              append_negative = excluded.append_negative,
+              is_default = excluded.is_default,
+              is_enabled = excluded.is_enabled,
+              updated_at = datetime('now')
+            """,
+            (
+                preset_id,
+                name,
+                str(payload.get("append_prompt") or ""),
+                str(payload.get("append_negative") or ""),
+                1 if payload.get("is_default") else 0,
+                1 if payload.get("is_enabled", True) else 0,
+            ),
+        )
+        saved = row(con, "SELECT * FROM prompt_translation_presets WHERE name = ?", (name,))
+    return {"ok": True, "preset": saved}
+
+
+def update_prompt_translation_preset(preset_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"name", "append_prompt", "append_negative", "is_default", "is_enabled"}
+    updates = []
+    params: list[Any] = []
+    for key in allowed:
+        if key not in payload:
+            continue
+        value = payload[key]
+        if key in {"name", "append_prompt", "append_negative"}:
+            value = str(value or "").strip()
+            if key == "name" and not value:
+                raise ValueError("name is required")
+        if key in {"is_default", "is_enabled"}:
+            value = 1 if value else 0
+        updates.append(f"{key} = ?")
+        params.append(value)
+    if not updates:
+        raise ValueError("no fields to update")
+    params.append(preset_id)
+    with db() as con:
+        con.execute(
+            f"UPDATE prompt_translation_presets SET {', '.join(updates)}, updated_at = datetime('now') WHERE preset_id = ?",
+            tuple(params),
+        )
+        saved = row(con, "SELECT * FROM prompt_translation_presets WHERE preset_id = ?", (preset_id,))
+    if not saved:
+        raise ValueError("preset not found")
+    return {"ok": True, "preset": saved}
+
+
 def discover_workflows() -> list[dict[str, Any]]:
     base = ROOT / "workflows"
     if not base.exists():
@@ -1364,6 +1662,32 @@ def bootstrap() -> dict[str, Any]:
             "comparisons": list_comparisons({})["comparisons"],
             "tags": rows(con, "SELECT * FROM tags ORDER BY name"),
             "panel_state": get_setting(con, "panel_state", {}),
+            "prompt_translation": {
+                "terms": rows(
+                    con,
+                    """
+                    SELECT * FROM prompt_translation_terms
+                    ORDER BY is_enabled DESC, category, length(source_text) DESC, source_text
+                    """,
+                ),
+                "presets": rows(
+                    con,
+                    """
+                    SELECT * FROM prompt_translation_presets
+                    ORDER BY is_default DESC, name
+                    """,
+                ),
+                "history": rows(
+                    con,
+                    """
+                    SELECT h.*, p.name AS preset_name
+                    FROM prompt_translation_history h
+                    LEFT JOIN prompt_translation_presets p ON p.preset_id = h.preset_id
+                    ORDER BY h.created_at DESC
+                    LIMIT 30
+                    """,
+                ),
+            },
             "diagnostics": diagnostics_summary(con, connections, git, storage),
         }
 
@@ -1418,6 +1742,19 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/diagnostics":
             self.send_json(diagnostics())
+            return
+        if self.path == "/api/prompt-translation":
+            self.send_json(prompt_translation_state())
+            return
+        if self.path == "/api/prompt-translation/terms" or self.path.startswith("/api/prompt-translation/terms?"):
+            self.send_json({"ok": True, "terms": list_prompt_translation_terms(parse_query_params(self.path).get("q", ""))})
+            return
+        if self.path == "/api/prompt-translation/presets":
+            self.send_json({"ok": True, "presets": list_prompt_translation_presets()})
+            return
+        if self.path == "/api/prompt-translation/history" or self.path.startswith("/api/prompt-translation/history?"):
+            limit = parse_query_params(self.path).get("limit", "50")
+            self.send_json({"ok": True, "history": list_prompt_translation_history(int(limit or 50))})
             return
         if self.path == "/api/civitai/config":
             self.send_json(civitai_config_status())
@@ -1483,6 +1820,15 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if self.path == "/api/civitai/config":
                 self.send_json(save_civitai_config(self.read_body()))
+                return
+            if self.path == "/api/prompt-translation/convert":
+                self.send_json(convert_prompt_translation(self.read_body()))
+                return
+            if self.path == "/api/prompt-translation/terms":
+                self.send_json(create_prompt_translation_term(self.read_body()))
+                return
+            if self.path == "/api/prompt-translation/presets":
+                self.send_json(create_prompt_translation_preset(self.read_body()))
                 return
             if self.path == "/api/recipes":
                 self.send_json(create_recipe(self.read_body()))
@@ -1550,6 +1896,14 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         try:
+            if self.path.startswith("/api/prompt-translation/terms/"):
+                term_id = self.path.split("/")[4]
+                self.send_json(update_prompt_translation_term(term_id, self.read_body()))
+                return
+            if self.path.startswith("/api/prompt-translation/presets/"):
+                preset_id = self.path.split("/")[4]
+                self.send_json(update_prompt_translation_preset(preset_id, self.read_body()))
+                return
             if self.path.startswith("/api/assets/"):
                 asset_id = self.path.split("/")[3]
                 self.send_json(update_asset(asset_id, self.read_body()))

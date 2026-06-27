@@ -12,6 +12,7 @@ let activeComparisonId = "";
 let boardAssets = [];
 let boardLoaded = false;
 let civitaiConfig = null;
+let promptTranslation = { terms: [], presets: [], history: [], last: null };
 
 const FIELD_LABELS = {
   positive_prompt: "Positive Prompt",
@@ -43,6 +44,11 @@ async function api(path, options = {}) {
 
 async function load() {
   state = await api("/api/bootstrap");
+  promptTranslation = {
+    ...promptTranslation,
+    ...(state.prompt_translation || {}),
+    last: promptTranslation.last,
+  };
   await loadCivitaiConfig().catch(() => { civitaiConfig = null; });
   render();
 }
@@ -63,6 +69,7 @@ function render() {
   renderDiagnostics();
   renderStorage();
   renderMappingTable();
+  renderPromptTranslation();
   updateScopeWarning();
 }
 
@@ -748,6 +755,198 @@ async function lookupCivitai(event) {
   `;
 }
 
+function renderPromptTranslation() {
+  const presetSelect = $("#translationPreset");
+  if (!presetSelect) return;
+  const presets = promptTranslation.presets || [];
+  const current = presetSelect.value;
+  presetSelect.innerHTML = presets
+    .filter((preset) => preset.is_enabled)
+    .map((preset) => `<option value="${escapeHtml(preset.preset_id)}">${escapeHtml(preset.name)}${preset.is_default ? " / 既定" : ""}</option>`)
+    .join("");
+  if ([...presetSelect.options].some((option) => option.value === current)) {
+    presetSelect.value = current;
+  }
+  renderTranslationResult(promptTranslation.last);
+}
+
+function renderTranslationResult(result) {
+  if (!$("#translatedPrompt")) return;
+  $("#translatedPrompt").value = result?.translated_prompt || "";
+  $("#translatedNegative").value = result?.translated_negative || "";
+  const terms = result?.unconverted_terms || [];
+  $("#translationUnconverted").innerHTML = terms.length
+    ? terms.map((term) => `<span class="chip warn">${escapeHtml(term)}</span>`).join("")
+    : `<span class="chip ok">なし</span>`;
+}
+
+async function refreshPromptTranslation() {
+  const result = await api("/api/prompt-translation");
+  promptTranslation = { ...promptTranslation, ...result, last: promptTranslation.last };
+  renderPromptTranslation();
+}
+
+async function convertPromptTranslation() {
+  const status = $("#translationStatus");
+  status.textContent = "変換中...";
+  const result = await api("/api/prompt-translation/convert", {
+    method: "POST",
+    body: JSON.stringify({
+      source_prompt: $("#translationSourcePrompt").value,
+      source_negative: $("#translationSourceNegative").value,
+      preset_id: $("#translationPreset").value,
+    }),
+  });
+  promptTranslation.last = result.result;
+  renderTranslationResult(result.result);
+  status.textContent = `変換しました。履歴ID: ${result.result.history_id}`;
+  await refreshTranslationHistory(false).catch(() => null);
+}
+
+function applyPromptTranslation() {
+  if (!promptTranslation.last) {
+    alert("先にPromptを変換してください。");
+    return;
+  }
+  const form = $("#generateForm");
+  form.elements.prompt.value = promptTranslation.last.translated_prompt || "";
+  form.elements.negative_prompt.value = promptTranslation.last.translated_negative || "";
+  $("#translationStatus").textContent = "生成Promptへ反映しました。";
+}
+
+async function openTranslationTerms() {
+  await refreshTranslationTerms(false);
+  $("#translationTermsDialog").showModal();
+}
+
+function renderTranslationTerms() {
+  const list = $("#translationTermList");
+  if (!list) return;
+  const query = ($("#translationTermSearch").value || "").toLowerCase();
+  const terms = (promptTranslation.terms || []).filter((term) => {
+    const haystack = `${term.source_text} ${term.target_text} ${term.category}`.toLowerCase();
+    return !query || haystack.includes(query);
+  });
+  list.innerHTML = terms.length ? terms.map((term) => `
+    <article class="term-row ${term.is_enabled ? "" : "disabled"}">
+      <div>
+        <strong>${escapeHtml(term.source_text)} → ${escapeHtml(term.target_text)}</strong>
+        <p>${escapeHtml(term.category || "general")} / weight ${escapeHtml(term.weight || 0)}</p>
+      </div>
+      <div class="term-actions">
+        <button type="button" data-edit-translation-term="${escapeHtml(term.term_id)}">編集</button>
+        <button type="button" data-toggle-translation-term="${escapeHtml(term.term_id)}:${term.is_enabled ? "0" : "1"}">${term.is_enabled ? "無効化" : "有効化"}</button>
+      </div>
+    </article>
+  `).join("") : `<div class="empty-state">辞書語がありません。</div>`;
+}
+
+async function refreshTranslationTerms(renderOnly = true) {
+  const result = await api("/api/prompt-translation/terms");
+  promptTranslation.terms = result.terms || [];
+  renderTranslationTerms();
+  if (!renderOnly) renderPromptTranslation();
+}
+
+async function saveTranslationTerm(event) {
+  event.preventDefault();
+  await api("/api/prompt-translation/terms", {
+    method: "POST",
+    body: JSON.stringify({
+      source_text: $("#newTranslationSource").value,
+      target_text: $("#newTranslationTarget").value,
+      category: $("#newTranslationCategory").value || "general",
+      weight: Number($("#newTranslationWeight").value || 0),
+      is_enabled: true,
+    }),
+  });
+  $("#newTranslationSource").value = "";
+  $("#newTranslationTarget").value = "";
+  $("#newTranslationCategory").value = "";
+  $("#newTranslationWeight").value = "0";
+  await refreshTranslationTerms();
+}
+
+async function editTranslationTerm(termId) {
+  const term = (promptTranslation.terms || []).find((item) => item.term_id === termId);
+  if (!term) return;
+  const targetText = prompt("英語タグ", term.target_text || "");
+  if (targetText == null) return;
+  const category = prompt("カテゴリ", term.category || "general");
+  if (category == null) return;
+  await api(`/api/prompt-translation/terms/${encodeURIComponent(termId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ target_text: targetText, category }),
+  });
+  await refreshTranslationTerms();
+}
+
+async function toggleTranslationTerm(termId, enabled) {
+  await api(`/api/prompt-translation/terms/${encodeURIComponent(termId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ is_enabled: enabled }),
+  });
+  await refreshTranslationTerms();
+}
+
+async function openTranslationHistory() {
+  await refreshTranslationHistory();
+  $("#translationHistoryDialog").showModal();
+}
+
+function normalizeHistoryItem(item) {
+  if (Array.isArray(item.unconverted_terms)) return item;
+  try {
+    item.unconverted_terms = JSON.parse(item.unconverted_terms_json || "[]");
+  } catch {
+    item.unconverted_terms = [];
+  }
+  return item;
+}
+
+function renderTranslationHistory() {
+  const list = $("#translationHistoryList");
+  if (!list) return;
+  const history = (promptTranslation.history || []).map(normalizeHistoryItem);
+  list.innerHTML = history.length ? history.map((item) => `
+    <article class="history-row">
+      <div>
+        <strong>${escapeHtml(item.created_at || "-")}</strong>
+        <p>${escapeHtml(item.source_prompt || "-")}</p>
+        <p>${escapeHtml(item.translated_prompt || "-")}</p>
+        <p>${escapeHtml(`未変換: ${(item.unconverted_terms || []).join(", ") || "なし"}`)}</p>
+      </div>
+      <button type="button" data-reuse-translation-history="${escapeHtml(item.history_id)}">再利用</button>
+    </article>
+  `).join("") : `<div class="empty-state">変換履歴はまだありません。</div>`;
+}
+
+async function refreshTranslationHistory(renderPanel = true) {
+  const result = await api("/api/prompt-translation/history");
+  promptTranslation.history = result.history || [];
+  renderTranslationHistory();
+  if (renderPanel) renderPromptTranslation();
+}
+
+function reuseTranslationHistory(historyId) {
+  const item = (promptTranslation.history || []).map(normalizeHistoryItem).find((history) => history.history_id === historyId);
+  if (!item) return;
+  promptTranslation.last = {
+    history_id: item.history_id,
+    source_prompt: item.source_prompt,
+    translated_prompt: item.translated_prompt,
+    source_negative: item.source_negative,
+    translated_negative: item.translated_negative,
+    unconverted_terms: item.unconverted_terms || [],
+    preset_id: item.preset_id,
+  };
+  $("#translationSourcePrompt").value = item.source_prompt || "";
+  $("#translationSourceNegative").value = item.source_negative || "";
+  renderTranslationResult(promptTranslation.last);
+  $("#translationHistoryDialog").close();
+  $("#translationStatus").textContent = "履歴を再利用できます。必要なら生成Promptへ反映してください。";
+}
+
 function renderSettings() {
   const details = $("#connectionDetails");
   const { comfyui, ollama } = state.connections;
@@ -1309,7 +1508,8 @@ function bindPanels() {
   $$(".dock-panel").forEach((panel) => {
     const key = `studio.panel.${panel.dataset.panel}`;
     if (localStorage.getItem(key) === "minimized") panel.classList.add("minimized");
-    panel.querySelector("h2").dataset.icon = panel.dataset.panel === "ollama" ? "O" : "D";
+    const icons = { promptTranslation: "P", ollama: "O", details: "D" };
+    panel.querySelector("h2").dataset.icon = icons[panel.dataset.panel] || "P";
     panel.querySelector(".panel-toggle").addEventListener("click", async () => {
       panel.classList.toggle("minimized");
       localStorage.setItem(key, panel.classList.contains("minimized") ? "minimized" : "open");
@@ -1370,6 +1570,15 @@ document.addEventListener("click", (event) => {
   }
   const exportCandidateButton = event.target.closest("[data-export-candidate]");
   if (exportCandidateButton) toggleExportCandidate(exportCandidateButton.dataset.exportCandidate).catch((error) => alert(error.message));
+  const editTranslationButton = event.target.closest("[data-edit-translation-term]");
+  if (editTranslationButton) editTranslationTerm(editTranslationButton.dataset.editTranslationTerm).catch((error) => alert(error.message));
+  const toggleTranslationButton = event.target.closest("[data-toggle-translation-term]");
+  if (toggleTranslationButton) {
+    const [termId, enabled] = toggleTranslationButton.dataset.toggleTranslationTerm.split(":");
+    toggleTranslationTerm(termId, enabled === "1").catch((error) => alert(error.message));
+  }
+  const reuseTranslationButton = event.target.closest("[data-reuse-translation-history]");
+  if (reuseTranslationButton) reuseTranslationHistory(reuseTranslationButton.dataset.reuseTranslationHistory);
 });
 
 document.addEventListener("change", (event) => {
@@ -1423,6 +1632,18 @@ $("#openStorageDialog").addEventListener("click", () => openStorageDialog("gener
 $("#detectMapping").addEventListener("click", () => detectMapping().catch((error) => alert(error.message)));
 $("#saveMapping").addEventListener("click", () => saveMapping().catch((error) => alert(error.message)));
 $("#testMappingSend").addEventListener("click", () => $("#generateForm").requestSubmit());
+$("#convertPromptTranslation").addEventListener("click", () => convertPromptTranslation().catch((error) => {
+  $("#translationStatus").textContent = `変換できませんでした: ${error.message}`;
+}));
+$("#applyPromptTranslation").addEventListener("click", applyPromptTranslation);
+$("#openTranslationTerms").addEventListener("click", () => openTranslationTerms().catch((error) => alert(error.message)));
+$("#openTranslationHistory").addEventListener("click", () => openTranslationHistory().catch((error) => alert(error.message)));
+$("#translationTermSearch").addEventListener("input", renderTranslationTerms);
+$("#translationTermForm").addEventListener("submit", (event) => saveTranslationTerm(event).catch((error) => alert(error.message)));
+$("#refreshTranslationTerms").addEventListener("click", () => refreshTranslationTerms().catch((error) => alert(error.message)));
+$("#refreshTranslationHistory").addEventListener("click", () => refreshTranslationHistory().catch((error) => alert(error.message)));
+$("#closeTranslationTerms").addEventListener("click", () => $("#translationTermsDialog").close());
+$("#closeTranslationHistory").addEventListener("click", () => $("#translationHistoryDialog").close());
 $("#closeAssetDetail").addEventListener("click", closeAssetDetail);
 $("#saveAssetDetail").addEventListener("click", () => saveAssetDetail().catch((error) => alert(error.message)));
 $("#detailRegenerate").addEventListener("click", () => selectedAsset && regenerate(selectedAsset.source_job_id).catch((error) => alert(error.message)));

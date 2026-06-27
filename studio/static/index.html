@@ -255,7 +255,7 @@
               <h2>About</h2>
               <dl class="info-list">
                 <dt>Product</dt><dd>AI Media Factory Studio</dd>
-                <dt>Version</dt><dd>v0.1.7</dd>
+                <dt>Version</dt><dd>v0.1.8</dd>
                 <dt>Brand</dt><dd>Designed & developed by LuckyFields LLC</dd>
                 <dt>License</dt><dd>Apache License 2.0</dd>
                 <dt>Notice</dt><dd>Local-first tool for ComfyUI &amp; Ollama. Third-party models and assets are managed by the user.</dd>
@@ -270,6 +270,42 @@
       </main>
 
       <aside class="right-panels" id="rightPanels">
+        <section class="dock-panel" data-panel="promptTranslation">
+          <header><h2>Prompt変換</h2><button class="panel-toggle" title="最小化">_</button></header>
+          <div class="panel-body prompt-translation-panel">
+            <label class="field">
+              <span>日本語Prompt</span>
+              <textarea id="translationSourcePrompt" rows="4" placeholder="夕暮れの海辺に立つ白いワンピースの少女、柔らかい光"></textarea>
+            </label>
+            <label class="field">
+              <span>日本語Negative</span>
+              <textarea id="translationSourceNegative" rows="2" placeholder="低品質、ぼやけ、文字"></textarea>
+            </label>
+            <label class="field">
+              <span>プリセット</span>
+              <select id="translationPreset"></select>
+            </label>
+            <div class="mapping-actions">
+              <button class="panel-action" type="button" id="convertPromptTranslation">変換</button>
+              <button class="panel-action" type="button" id="applyPromptTranslation">生成Promptへ反映</button>
+              <button class="panel-action" type="button" id="openTranslationTerms">辞書を編集</button>
+              <button class="panel-action" type="button" id="openTranslationHistory">履歴を見る</button>
+            </div>
+            <label class="field">
+              <span>Positive変換結果</span>
+              <textarea id="translatedPrompt" rows="4" readonly></textarea>
+            </label>
+            <label class="field">
+              <span>Negative変換結果</span>
+              <textarea id="translatedNegative" rows="2" readonly></textarea>
+            </label>
+            <div>
+              <span class="field-label">未変換語</span>
+              <div class="chip-list" id="translationUnconverted"></div>
+            </div>
+            <p class="note" id="translationStatus">Ollamaや外部APIを使わず、Studio内辞書だけで変換します。</p>
+          </div>
+        </section>
         <section class="dock-panel" data-panel="ollama">
           <header><h2>Ollama</h2><button class="panel-toggle" title="最小化">_</button></header>
           <div class="panel-body">
@@ -445,6 +481,38 @@
             <button class="secondary" type="button" id="testStoragePath">書き込みテスト</button>
             <button class="primary" type="submit">保存</button>
             <button class="secondary" type="button" id="cancelStorageDialog">キャンセル</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog class="recipe-dialog wide-dialog" id="translationTermsDialog">
+        <form method="dialog" id="translationTermForm">
+          <h2>Prompt変換辞書</h2>
+          <label class="field"><span>検索</span><input id="translationTermSearch" placeholder="夕暮れ / sunset / 場所"></label>
+          <div class="term-list" id="translationTermList"></div>
+          <div class="detail-grid">
+            <label class="field"><span>日本語</span><input id="newTranslationSource" placeholder="夕暮れ" required></label>
+            <label class="field"><span>英語タグ</span><input id="newTranslationTarget" placeholder="sunset" required></label>
+          </div>
+          <div class="detail-grid">
+            <label class="field"><span>カテゴリ</span><input id="newTranslationCategory" placeholder="時間帯"></label>
+            <label class="field"><span>重み</span><input id="newTranslationWeight" type="number" value="0"></label>
+          </div>
+          <div class="action-row">
+            <button class="primary" type="submit">追加</button>
+            <button class="secondary" type="button" id="refreshTranslationTerms">再読込</button>
+            <button class="secondary" type="button" id="closeTranslationTerms">閉じる</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog class="recipe-dialog wide-dialog" id="translationHistoryDialog">
+        <form method="dialog">
+          <h2>変換履歴</h2>
+          <div class="history-list" id="translationHistoryList"></div>
+          <div class="action-row">
+            <button class="secondary" type="button" id="refreshTranslationHistory">再読込</button>
+            <button class="secondary" type="button" id="closeTranslationHistory">閉じる</button>
           </div>
         </form>
       </dialog>

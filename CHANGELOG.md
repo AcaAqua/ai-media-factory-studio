@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.8 - 2026-06-27
+
+- Added local dictionary-based Japanese Prompt to English tag Prompt conversion.
+- Added Prompt translation terms, presets, and history tables.
+- Added Prompt translation API endpoints for conversion, dictionary editing, presets, and history.
+- Added Prompt translation panel, dictionary editor, history viewer, and manual apply action for generation prompts.
+- Updated About screen version to `v0.1.8`.
+
 ## v0.1.7 - 2026-06-27
 
 - Added diagnostics API and diagnostics panel.
