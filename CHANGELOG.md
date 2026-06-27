@@ -5,6 +5,7 @@
 - Added initial Studio asset registry tables for model, LoRA, VAE, ControlNet, upscaler, and workflow locations.
 - Added non-destructive asset scanning that records file metadata without moving or deleting source files.
 - Added Studio asset registry panel and rescan action to the Models view.
+- Added asset registry metadata editing for source URL, license, creator, base model, status, and notes.
 
 ## v0.1.8 - 2026-06-27
 

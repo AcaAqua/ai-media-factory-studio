@@ -547,6 +547,33 @@
           </div>
         </form>
       </dialog>
+
+      <dialog class="recipe-dialog wide-dialog" id="assetRegistryItemDialog">
+        <form method="dialog" id="assetRegistryItemForm">
+          <h2>資産詳細</h2>
+          <input type="hidden" id="assetRegistryItemId">
+          <dl class="info-list" id="assetRegistryItemInfo"></dl>
+          <div class="detail-grid">
+            <label class="field"><span>確認状態</span><select id="assetRegistryItemStatus">
+              <option value="unverified">unverified</option>
+              <option value="verified">verified</option>
+              <option value="needs_review">needs_review</option>
+              <option value="rejected">rejected</option>
+            </select></label>
+            <label class="field"><span>対応base model</span><input id="assetRegistryItemBaseModel" placeholder="SDXL / Flux / NoobAI"></label>
+          </div>
+          <div class="detail-grid">
+            <label class="field"><span>作者</span><input id="assetRegistryItemCreator"></label>
+            <label class="field"><span>ライセンス</span><input id="assetRegistryItemLicense"></label>
+          </div>
+          <label class="field"><span>出典URL</span><input id="assetRegistryItemSourceUrl" placeholder="https://..."></label>
+          <label class="field"><span>メモ</span><textarea id="assetRegistryItemNotes" rows="3"></textarea></label>
+          <div class="action-row">
+            <button class="primary" type="submit">保存</button>
+            <button class="secondary" type="button" id="cancelAssetRegistryItem">キャンセル</button>
+          </div>
+        </form>
+      </dialog>
     </div>
 
     <script src="/app.js" type="module"></script>

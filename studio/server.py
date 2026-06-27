@@ -742,6 +742,42 @@ def create_asset_registry_location(payload: dict[str, Any]) -> dict[str, Any]:
     return list_asset_registry()
 
 
+def update_asset_registry_item(item_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {"source_url", "license", "creator", "base_model", "status", "notes"}
+    updates = []
+    params: list[Any] = []
+    if "status" in payload and str(payload.get("status") or "") not in {"unverified", "verified", "needs_review", "rejected"}:
+        raise ValueError("invalid asset status")
+    for key in allowed:
+        if key not in payload:
+            continue
+        value = str(payload.get(key) or "").strip()
+        updates.append(f"{key} = ?")
+        params.append(value)
+    if not updates:
+        raise ValueError("no fields to update")
+    params.append(item_id)
+    with db() as con:
+        existing = row(con, "SELECT item_id FROM asset_registry_items WHERE item_id = ?", (item_id,))
+        if not existing:
+            raise ValueError("asset registry item not found")
+        con.execute(
+            f"UPDATE asset_registry_items SET {', '.join(updates)}, updated_at = datetime('now') WHERE item_id = ?",
+            tuple(params),
+        )
+        item = row(
+            con,
+            """
+            SELECT i.*, l.name AS location_name, l.base_path AS location_base_path
+            FROM asset_registry_items i
+            LEFT JOIN asset_registry_locations l ON l.location_id = i.location_id
+            WHERE i.item_id = ?
+            """,
+            (item_id,),
+        )
+    return {"ok": True, "item": item}
+
+
 def scan_asset_registry_location(con: sqlite3.Connection, location: dict[str, Any]) -> dict[str, Any]:
     location_id = location["location_id"]
     asset_kind = location["asset_kind"]
@@ -2119,6 +2155,10 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         try:
+            if self.path.startswith("/api/asset-registry/items/"):
+                item_id = self.path.split("/")[4]
+                self.send_json(update_asset_registry_item(item_id, self.read_body()))
+                return
             if self.path.startswith("/api/prompt-translation/terms/"):
                 term_id = self.path.split("/")[4]
                 self.send_json(update_prompt_translation_term(term_id, self.read_body()))

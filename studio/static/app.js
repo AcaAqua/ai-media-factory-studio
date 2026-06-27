@@ -14,6 +14,7 @@ let boardLoaded = false;
 let civitaiConfig = null;
 let promptTranslation = { terms: [], presets: [], history: [], last: null };
 let assetRegistry = { locations: [], items: [], scan_runs: [] };
+let activeAssetRegistryItem = null;
 
 const FIELD_LABELS = {
   positive_prompt: "Positive Prompt",
@@ -717,6 +718,10 @@ function renderAssetRegistry() {
       </header>
       <p>${escapeHtml(item.relative_path)}</p>
       <p>${escapeHtml(item.location_name || "-")} / ${formatBytes(item.size_bytes || 0)} / ${escapeHtml(item.status || "unverified")}</p>
+      <p>${escapeHtml([item.base_model, item.license, item.creator].filter(Boolean).join(" / ") || "metadata未設定")}</p>
+      <div class="action-row">
+        <button type="button" data-edit-registry-item="${escapeHtml(item.item_id)}">詳細編集</button>
+      </div>
     </article>
   `).join("");
   list.innerHTML = `
@@ -734,6 +739,48 @@ function renderAssetRegistry() {
 async function refreshAssetRegistry() {
   assetRegistry = await api("/api/asset-registry");
   renderAssetRegistry();
+}
+
+function openAssetRegistryItem(itemId) {
+  const item = (assetRegistry.items || []).find((entry) => entry.item_id === itemId);
+  if (!item) return;
+  activeAssetRegistryItem = item;
+  $("#assetRegistryItemId").value = item.item_id;
+  $("#assetRegistryItemStatus").value = item.status || "unverified";
+  $("#assetRegistryItemBaseModel").value = item.base_model || "";
+  $("#assetRegistryItemCreator").value = item.creator || "";
+  $("#assetRegistryItemLicense").value = item.license || "";
+  $("#assetRegistryItemSourceUrl").value = item.source_url || "";
+  $("#assetRegistryItemNotes").value = item.notes || "";
+  $("#assetRegistryItemInfo").innerHTML = `
+    <dt>名前</dt><dd>${escapeHtml(item.name)}</dd>
+    <dt>種類</dt><dd>${escapeHtml(assetKindLabel(item.asset_kind))}</dd>
+    <dt>保存先</dt><dd>${escapeHtml(item.location_name || "-")}</dd>
+    <dt>相対パス</dt><dd>${escapeHtml(item.relative_path)}</dd>
+    <dt>サイズ</dt><dd>${escapeHtml(formatBytes(item.size_bytes || 0))}</dd>
+  `;
+  $("#assetRegistryItemDialog").showModal();
+}
+
+async function saveAssetRegistryItem(event) {
+  event.preventDefault();
+  const itemId = $("#assetRegistryItemId").value;
+  if (!itemId) return;
+  const result = await api(`/api/asset-registry/items/${encodeURIComponent(itemId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      status: $("#assetRegistryItemStatus").value,
+      base_model: $("#assetRegistryItemBaseModel").value,
+      creator: $("#assetRegistryItemCreator").value,
+      license: $("#assetRegistryItemLicense").value,
+      source_url: $("#assetRegistryItemSourceUrl").value,
+      notes: $("#assetRegistryItemNotes").value,
+    }),
+  });
+  assetRegistry.items = (assetRegistry.items || []).map((item) => item.item_id === itemId ? result.item : item);
+  renderAssetRegistry();
+  $("#assetRegistryItemDialog").close();
+  activeAssetRegistryItem = null;
 }
 
 async function scanAssetRegistry() {
@@ -1681,6 +1728,8 @@ document.addEventListener("click", (event) => {
   }
   const reuseTranslationButton = event.target.closest("[data-reuse-translation-history]");
   if (reuseTranslationButton) reuseTranslationHistory(reuseTranslationButton.dataset.reuseTranslationHistory);
+  const editRegistryButton = event.target.closest("[data-edit-registry-item]");
+  if (editRegistryButton) openAssetRegistryItem(editRegistryButton.dataset.editRegistryItem);
 });
 
 document.addEventListener("change", (event) => {
@@ -1697,6 +1746,8 @@ $("#civitaiLookupForm").addEventListener("submit", (event) => lookupCivitai(even
 }));
 $("#scanAssetRegistry").addEventListener("click", () => scanAssetRegistry().catch((error) => alert(error.message)));
 $("#assetLocationForm").addEventListener("submit", (event) => saveAssetLocation(event).catch((error) => alert(error.message)));
+$("#assetRegistryItemForm").addEventListener("submit", (event) => saveAssetRegistryItem(event).catch((error) => alert(error.message)));
+$("#cancelAssetRegistryItem").addEventListener("click", () => { activeAssetRegistryItem = null; $("#assetRegistryItemDialog").close(); });
 $("#refreshButton").addEventListener("click", async () => {
   await api("/api/jobs/poll", { method: "POST", body: "{}" }).catch(() => null);
   await load();
