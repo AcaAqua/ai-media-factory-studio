@@ -253,6 +253,15 @@
             <p class="note">この段階ではメタデータ確認のみ行います。モデル/LoRAファイルのダウンロード、移動、DB登録は行いません。</p>
             <div id="civitaiPreview" class="civitai-preview"></div>
           </div>
+          <div class="surface">
+            <div class="section-head">
+              <h2>Workflow必要資産</h2>
+              <button class="secondary" type="button" id="scanWorkflowRequirements">不足検知</button>
+            </div>
+            <p class="note">Workflow JSON内のCheckpoint / LoRA / VAE / ControlNet / Upscaler参照を読み取り、資産台帳と照合します。Workflow原本は変更しません。</p>
+            <div class="asset-registry-summary" id="workflowRequirementSummary"></div>
+            <div class="asset-registry-list" id="workflowRequirementList"></div>
+          </div>
         </section>
 
         <section class="view" id="view-updates">

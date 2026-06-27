@@ -313,6 +313,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   padding: 10px;
   margin-bottom: 12px;
 }
+.civitai-apply {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
 .asset-registry-summary {
   margin: 10px 0;
 }

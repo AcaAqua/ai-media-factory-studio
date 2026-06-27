@@ -6,6 +6,8 @@
 - Added non-destructive asset scanning that records file metadata without moving or deleting source files.
 - Added Studio asset registry panel and rescan action to the Models view.
 - Added asset registry metadata editing for source URL, license, creator, base model, status, and notes.
+- Added Civitai metadata apply action for asset registry items.
+- Added Workflow required asset scan and missing/matched diagnostics.
 
 ## v0.1.8 - 2026-06-27
 

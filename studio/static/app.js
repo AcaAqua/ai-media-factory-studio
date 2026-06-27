@@ -15,6 +15,7 @@ let civitaiConfig = null;
 let promptTranslation = { terms: [], presets: [], history: [], last: null };
 let assetRegistry = { locations: [], items: [], scan_runs: [] };
 let activeAssetRegistryItem = null;
+let lastCivitaiLookup = null;
 
 const FIELD_LABELS = {
   positive_prompt: "Positive Prompt",
@@ -668,6 +669,7 @@ function renderModels() {
     list.innerHTML = models.map((model) => `<span class="chip ok">${escapeHtml(model)}</span>`).join("");
   }
   renderAssetRegistry();
+  renderWorkflowRequirements();
   renderCivitaiConfig();
 }
 
@@ -734,6 +736,54 @@ function renderAssetRegistry() {
       <div class="asset-registry-grid">${itemHtml || `<div class="empty-state">まだスキャンされていません。</div>`}</div>
     </details>
   `;
+}
+
+function renderWorkflowRequirements() {
+  const summary = $("#workflowRequirementSummary");
+  const list = $("#workflowRequirementList");
+  if (!summary || !list) return;
+  const requirements = assetRegistry.requirements || [];
+  const counts = requirements.reduce((acc, item) => {
+    const key = `${item.status}:${item.asset_kind}`;
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  summary.innerHTML = `
+    <div class="chip-list">
+      ${Object.entries(counts).map(([key, count]) => {
+        const [status, kind] = key.split(":");
+        return `<span class="chip ${status === "missing" ? "warn" : "ok"}">${escapeHtml(status)} ${escapeHtml(assetKindLabel(kind))}: ${escapeHtml(count)}</span>`;
+      }).join("") || `<span class="chip warn">未検出</span>`}
+      <span class="chip">要求 ${requirements.length}</span>
+    </div>
+  `;
+  list.innerHTML = `
+    <div class="asset-registry-grid">
+      ${requirements.map((item) => `
+        <article class="asset-registry-card ${item.status === "missing" ? "missing" : ""}">
+          <header>
+            <strong>${escapeHtml(item.asset_name)}</strong>
+            <span class="chip ${item.status === "missing" ? "warn" : "ok"}">${escapeHtml(item.status)}</span>
+          </header>
+          <p>${escapeHtml(item.workflow_name)} / node ${escapeHtml(item.node_id)} / ${escapeHtml(item.class_type)}</p>
+          <p>${escapeHtml(assetKindLabel(item.asset_kind))} / ${escapeHtml(item.input_key)}</p>
+          <p>${escapeHtml(item.matched_relative_path || "台帳一致なし")}</p>
+        </article>
+      `).join("") || `<div class="empty-state">まだWorkflow要求資産を検出していません。</div>`}
+    </div>
+  `;
+}
+
+async function scanWorkflowRequirements() {
+  $("#scanWorkflowRequirements").disabled = true;
+  try {
+    const result = await api("/api/asset-registry/workflow-requirements/scan", { method: "POST", body: "{}" });
+    assetRegistry.requirements = result.requirements || [];
+    assetRegistry.requirement_counts = result.counts || [];
+    renderWorkflowRequirements();
+  } finally {
+    $("#scanWorkflowRequirements").disabled = false;
+  }
 }
 
 async function refreshAssetRegistry() {
@@ -872,9 +922,14 @@ async function lookupCivitai(event) {
   preview.innerHTML = `<div class="empty-state">Civitaiメタデータを取得しています...</div>`;
   const result = await api("/api/civitai/lookup", { method: "POST", body: JSON.stringify({ url }) });
   const item = result.civitai;
+  lastCivitaiLookup = item;
   const model = item.model || {};
   const version = item.version || {};
   const files = version.files || [];
+  const targetOptions = (assetRegistry.items || [])
+    .filter((asset) => !asset.missing)
+    .map((asset) => `<option value="${escapeHtml(asset.item_id)}">${escapeHtml(`${assetKindLabel(asset.asset_kind)} / ${asset.name}`)}</option>`)
+    .join("");
   preview.innerHTML = `
     <article class="civitai-card">
       <header>
@@ -900,8 +955,35 @@ async function lookupCivitai(event) {
           `).join("") || `<p class="note">ファイル情報なし</p>`}
         </div>
       </details>
+      <div class="civitai-apply">
+        <label class="field">
+          <span>反映先資産</span>
+          <select id="civitaiAssetTarget">${targetOptions}</select>
+        </label>
+        <button class="secondary" type="button" id="applyCivitaiToAsset">選択資産へ反映</button>
+        <p class="note">出典URL、作者、base model、trigger words等を資産台帳へ反映します。ファイルは移動・ダウンロードしません。</p>
+      </div>
     </article>
   `;
+}
+
+async function applyCivitaiToAsset() {
+  if (!lastCivitaiLookup) {
+    alert("先にCivitaiメタデータを確認してください。");
+    return;
+  }
+  const itemId = $("#civitaiAssetTarget")?.value;
+  if (!itemId) {
+    alert("反映先資産を選択してください。");
+    return;
+  }
+  const result = await api("/api/asset-registry/apply-civitai", {
+    method: "POST",
+    body: JSON.stringify({ item_id: itemId, civitai: lastCivitaiLookup }),
+  });
+  assetRegistry.items = (assetRegistry.items || []).map((item) => item.item_id === itemId ? result.item : item);
+  renderAssetRegistry();
+  alert("Civitaiメタデータを資産台帳へ反映しました。確認状態はneeds_reviewです。");
 }
 
 function renderPromptTranslation() {
@@ -1730,6 +1812,8 @@ document.addEventListener("click", (event) => {
   if (reuseTranslationButton) reuseTranslationHistory(reuseTranslationButton.dataset.reuseTranslationHistory);
   const editRegistryButton = event.target.closest("[data-edit-registry-item]");
   if (editRegistryButton) openAssetRegistryItem(editRegistryButton.dataset.editRegistryItem);
+  const applyCivitaiButton = event.target.closest("#applyCivitaiToAsset");
+  if (applyCivitaiButton) applyCivitaiToAsset().catch((error) => alert(error.message));
 });
 
 document.addEventListener("change", (event) => {
@@ -1745,6 +1829,7 @@ $("#civitaiLookupForm").addEventListener("submit", (event) => lookupCivitai(even
   $("#civitaiPreview").innerHTML = `<div class="empty-state">取得できませんでした: ${escapeHtml(error.message)}</div>`;
 }));
 $("#scanAssetRegistry").addEventListener("click", () => scanAssetRegistry().catch((error) => alert(error.message)));
+$("#scanWorkflowRequirements").addEventListener("click", () => scanWorkflowRequirements().catch((error) => alert(error.message)));
 $("#assetLocationForm").addEventListener("submit", (event) => saveAssetLocation(event).catch((error) => alert(error.message)));
 $("#assetRegistryItemForm").addEventListener("submit", (event) => saveAssetRegistryItem(event).catch((error) => alert(error.message)));
 $("#cancelAssetRegistryItem").addEventListener("click", () => { activeAssetRegistryItem = null; $("#assetRegistryItemDialog").close(); });

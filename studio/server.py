@@ -778,6 +778,219 @@ def update_asset_registry_item(item_id: str, payload: dict[str, Any]) -> dict[st
     return {"ok": True, "item": item}
 
 
+def asset_kind_from_civitai_type(model_type: str) -> str:
+    value = (model_type or "").lower()
+    if "lora" in value:
+        return "lora"
+    if "vae" in value:
+        return "vae"
+    if "controlnet" in value:
+        return "controlnet"
+    if "upscaler" in value:
+        return "upscaler"
+    return "checkpoint"
+
+
+def apply_civitai_to_asset_registry(payload: dict[str, Any]) -> dict[str, Any]:
+    item_id = str(payload.get("item_id") or "").strip()
+    civitai = payload.get("civitai") if isinstance(payload.get("civitai"), dict) else {}
+    model = civitai.get("model") if isinstance(civitai.get("model"), dict) else {}
+    version = civitai.get("version") if isinstance(civitai.get("version"), dict) else {}
+    if not item_id:
+        raise ValueError("item_id is required")
+    notes = []
+    if version.get("name"):
+        notes.append(f"Civitai version: {version.get('name')}")
+    trained_words = version.get("trained_words") if isinstance(version.get("trained_words"), list) else []
+    if trained_words:
+        notes.append(f"Trigger words: {', '.join(str(item) for item in trained_words[:12])}")
+    tags = model.get("tags") if isinstance(model.get("tags"), list) else []
+    if tags:
+        notes.append(f"Tags: {', '.join(str(item) for item in tags[:16])}")
+    update = {
+        "source_url": str(civitai.get("source_url") or ""),
+        "creator": str(model.get("creator") or ""),
+        "base_model": str(version.get("base_model") or ""),
+        "license": str(payload.get("license") or ""),
+        "status": "needs_review",
+        "notes": "\n".join(notes),
+    }
+    result = update_asset_registry_item(item_id, update)
+    result["asset_kind_hint"] = asset_kind_from_civitai_type(str(model.get("type") or ""))
+    return result
+
+
+def workflow_requirement_kind(class_type: str, input_key: str) -> str | None:
+    class_lower = class_type.lower()
+    key = input_key.lower()
+    if "checkpointloadersimple" in class_lower and key == "ckpt_name":
+        return "checkpoint"
+    if "loraloader" in class_lower and key == "lora_name":
+        return "lora"
+    if "vaeloader" in class_lower and key in {"vae_name", "ckpt_name"}:
+        return "vae"
+    if "controlnetloader" in class_lower and key in {"control_net_name", "controlnet_name"}:
+        return "controlnet"
+    if "upscalemodelloader" in class_lower and key == "model_name":
+        return "upscaler"
+    return None
+
+
+def normalize_asset_name(value: str) -> str:
+    name = Path(str(value or "")).name.lower()
+    for suffix in [".safetensors", ".ckpt", ".pth", ".pt", ".bin", ".onnx", ".json"]:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def find_matching_asset_item(con: sqlite3.Connection, asset_kind: str, asset_name: str) -> dict[str, Any] | None:
+    wanted = normalize_asset_name(asset_name)
+    candidates = rows(
+        con,
+        """
+        SELECT * FROM asset_registry_items
+        WHERE asset_kind = ? AND missing = 0
+        """,
+        (asset_kind,),
+    )
+    for item in candidates:
+        if normalize_asset_name(item.get("file_name") or item.get("name") or "") == wanted:
+            return item
+    for item in candidates:
+        candidate = normalize_asset_name(item.get("file_name") or item.get("name") or "")
+        if wanted and (wanted in candidate or candidate in wanted):
+            return item
+    return None
+
+
+def extract_workflow_requirements_from_file(path: Path) -> list[dict[str, Any]]:
+    workflow_json = json.loads(path.read_text(encoding="utf-8"))
+    requirements = []
+    for node in workflow_nodes(workflow_json):
+        for input_key, value in node["inputs"].items():
+            if not isinstance(value, str) or not value.strip():
+                continue
+            asset_kind = workflow_requirement_kind(node["class_type"], input_key)
+            if not asset_kind:
+                continue
+            requirements.append(
+                {
+                    "node_id": node["node_id"],
+                    "class_type": node["class_type"],
+                    "asset_kind": asset_kind,
+                    "asset_name": value,
+                    "input_key": input_key,
+                }
+            )
+    return requirements
+
+
+def scan_workflow_asset_requirements(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    target_path = str(payload.get("workflow_path") or "").strip().replace("\\", "/")
+    workflow_root = (ROOT / "workflows").resolve()
+    workflow_files = []
+    if target_path:
+        path = (ROOT / target_path).resolve()
+        if not path.exists() or workflow_root not in path.parents:
+            raise ValueError("workflow path is outside workflows or missing")
+        workflow_files = [path]
+    elif workflow_root.exists():
+        workflow_files = sorted(workflow_root.rglob("*.json"))
+    scanned = detected = matched = missing = 0
+    with db() as con:
+        for path in workflow_files:
+            try:
+                relative = path.relative_to(ROOT).as_posix()
+                requirements = extract_workflow_requirements_from_file(path)
+            except Exception:
+                continue
+            scanned += 1
+            active_keys = set()
+            for req in requirements:
+                detected += 1
+                match = find_matching_asset_item(con, req["asset_kind"], req["asset_name"])
+                status = "matched" if match else "missing"
+                if match:
+                    matched += 1
+                else:
+                    missing += 1
+                active_keys.add((relative, req["node_id"], req["input_key"], req["asset_name"]))
+                requirement_id = new_id("war")
+                con.execute(
+                    """
+                    INSERT INTO workflow_asset_requirements
+                      (requirement_id, workflow_path, workflow_name, node_id, class_type, asset_kind, asset_name,
+                       input_key, matched_item_id, status, last_checked_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    ON CONFLICT(workflow_path, node_id, input_key, asset_name) DO UPDATE SET
+                      workflow_name = excluded.workflow_name,
+                      class_type = excluded.class_type,
+                      asset_kind = excluded.asset_kind,
+                      matched_item_id = excluded.matched_item_id,
+                      status = excluded.status,
+                      last_checked_at = datetime('now'),
+                      updated_at = datetime('now')
+                    """,
+                    (
+                        requirement_id,
+                        relative,
+                        path.stem,
+                        req["node_id"],
+                        req["class_type"],
+                        req["asset_kind"],
+                        req["asset_name"],
+                        req["input_key"],
+                        match["item_id"] if match else None,
+                        status,
+                    ),
+                )
+            existing = rows(con, "SELECT workflow_path, node_id, input_key, asset_name FROM workflow_asset_requirements WHERE workflow_path = ?", (relative,))
+            for item in existing:
+                key = (item["workflow_path"], item["node_id"], item["input_key"], item["asset_name"])
+                if key not in active_keys:
+                    con.execute(
+                        """
+                        UPDATE workflow_asset_requirements
+                        SET status = 'stale', matched_item_id = NULL, updated_at = datetime('now')
+                        WHERE workflow_path = ? AND node_id = ? AND input_key = ? AND asset_name = ?
+                        """,
+                        key,
+                    )
+    result = list_workflow_asset_requirements()
+    result["scan_summary"] = {"workflows": scanned, "detected": detected, "matched": matched, "missing": missing}
+    return result
+
+
+def list_workflow_asset_requirements() -> dict[str, Any]:
+    with db() as con:
+        requirements = rows(
+            con,
+            """
+            SELECT r.*, i.name AS matched_name, i.relative_path AS matched_relative_path
+            FROM workflow_asset_requirements r
+            LEFT JOIN asset_registry_items i ON i.item_id = r.matched_item_id
+            ORDER BY
+              CASE r.status WHEN 'missing' THEN 0 WHEN 'matched' THEN 1 ELSE 2 END,
+              r.workflow_name,
+              r.asset_kind,
+              r.asset_name
+            LIMIT 500
+            """,
+        )
+        counts = rows(
+            con,
+            """
+            SELECT status, asset_kind, COUNT(*) AS count
+            FROM workflow_asset_requirements
+            GROUP BY status, asset_kind
+            ORDER BY status, asset_kind
+            """,
+        )
+    return {"ok": True, "requirements": requirements, "counts": counts}
+
+
 def scan_asset_registry_location(con: sqlite3.Connection, location: dict[str, Any]) -> dict[str, Any]:
     location_id = location["location_id"]
     asset_kind = location["asset_kind"]
@@ -1911,6 +2124,16 @@ def bootstrap() -> dict[str, Any]:
                     """,
                 ),
                 "scan_runs": rows(con, "SELECT * FROM asset_scan_runs ORDER BY started_at DESC LIMIT 20"),
+                "requirements": rows(
+                    con,
+                    """
+                    SELECT r.*, i.name AS matched_name, i.relative_path AS matched_relative_path
+                    FROM workflow_asset_requirements r
+                    LEFT JOIN asset_registry_items i ON i.item_id = r.matched_item_id
+                    ORDER BY r.status DESC, r.workflow_name, r.asset_kind, r.asset_name
+                    LIMIT 500
+                    """,
+                ),
             },
             "prompt_translation": {
                 "terms": rows(
@@ -1985,6 +2208,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/asset-registry":
             self.send_json(list_asset_registry())
+            return
+        if self.path == "/api/asset-registry/workflow-requirements":
+            self.send_json(list_workflow_asset_requirements())
             return
         if self.path == "/api/comparisons" or self.path.startswith("/api/comparisons?"):
             self.send_json(list_comparisons(parse_query_params(self.path)))
@@ -2079,6 +2305,12 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if self.path == "/api/asset-registry/scan":
                 self.send_json(scan_asset_registry(self.read_body()))
+                return
+            if self.path == "/api/asset-registry/workflow-requirements/scan":
+                self.send_json(scan_workflow_asset_requirements(self.read_body()))
+                return
+            if self.path == "/api/asset-registry/apply-civitai":
+                self.send_json(apply_civitai_to_asset_registry(self.read_body()))
                 return
             if self.path == "/api/prompt-translation/convert":
                 self.send_json(convert_prompt_translation(self.read_body()))
