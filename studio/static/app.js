@@ -710,24 +710,85 @@ function renderAssetLinkPreview() {
   `;
 }
 
-function confirmWorkflowAssetReadiness() {
+async function confirmWorkflowAssetReadiness() {
   const selected = $("#workflowSelect")?.value || "";
   if (!selected) return true;
   if (selected.startsWith("discover:")) {
-    return confirm("未登録Workflowです。生成時に登録されますが、Workflow必要資産チェックはまだ反映されません。このまま送信しますか？");
+    return openWorkflowAssetWarningDialog({
+      message: "未登録Workflowです。生成時に登録されますが、Workflow必要資産チェックはまだ反映されません。",
+      requirements: [],
+      allowScan: false,
+    });
   }
   const requirements = selectedWorkflowAssetRequirements();
   if (!requirements.length) {
-    return confirm("このWorkflowの必要資産は未検出です。モデル画面で不足検知を実行してから送信することを推奨します。このまま送信しますか？");
+    return openWorkflowAssetWarningDialog({
+      message: "このWorkflowの必要資産は未検出です。モデル画面で不足検知を実行してから送信することを推奨します。",
+      requirements: [],
+      allowScan: true,
+    });
   }
   const missing = requirements.filter((item) => item.status === "missing");
   if (!missing.length) return true;
-  const preview = missing
-    .slice(0, 8)
-    .map((item) => `- ${assetKindLabel(item.asset_kind)}: ${item.asset_name}`)
-    .join("\n");
-  const suffix = missing.length > 8 ? `\n...ほか ${missing.length - 8}件` : "";
-  return confirm(`このWorkflowには不足資産があります。\n${preview}${suffix}\n\nこのまま送信するとComfyUI側で失敗する可能性があります。続行しますか？`);
+  return openWorkflowAssetWarningDialog({
+    message: "このWorkflowには不足資産があります。このまま送信するとComfyUI側で失敗する可能性があります。",
+    requirements: missing,
+    allowScan: true,
+  });
+}
+
+function openWorkflowAssetWarningDialog({ message, requirements = [], allowScan = true }) {
+  const dialog = $("#workflowAssetWarningDialog");
+  $("#workflowAssetWarningMessage").textContent = message;
+  $("#workflowAssetWarningScan").disabled = !allowScan;
+  $("#workflowAssetWarningList").innerHTML = requirements.length
+    ? `<div class="asset-registry-grid">${requirements.map((item) => `
+        <article class="asset-registry-card missing">
+          <header>
+            <strong>${escapeHtml(item.asset_name)}</strong>
+            <span class="chip warn">${escapeHtml(assetKindLabel(item.asset_kind))}</span>
+          </header>
+          <p>${escapeHtml(item.workflow_name)} / node ${escapeHtml(item.node_id)} / ${escapeHtml(item.class_type)}</p>
+          <p>${escapeHtml(item.input_key)}</p>
+        </article>
+      `).join("")}</div>`
+    : `<div class="empty-state">不足資産の詳細はまだありません。</div>`;
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      $("#workflowAssetWarningContinue").onclick = null;
+      $("#workflowAssetWarningCancel").onclick = null;
+      $("#workflowAssetWarningGoModels").onclick = null;
+      $("#workflowAssetWarningScan").onclick = null;
+    };
+    $("#workflowAssetWarningContinue").onclick = () => {
+      cleanup();
+      dialog.close();
+      resolve(true);
+    };
+    $("#workflowAssetWarningCancel").onclick = () => {
+      cleanup();
+      dialog.close();
+      resolve(false);
+    };
+    $("#workflowAssetWarningGoModels").onclick = () => {
+      cleanup();
+      dialog.close();
+      switchView("models");
+      resolve(false);
+    };
+    $("#workflowAssetWarningScan").onclick = async () => {
+      try {
+        await scanWorkflowRequirements();
+        cleanup();
+        dialog.close();
+        switchView("models");
+        resolve(false);
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+    dialog.showModal();
+  });
 }
 
 function renderModels() {
@@ -1970,7 +2031,7 @@ function updateScopeWarning() {
 
 async function submitGeneration(event) {
   event.preventDefault();
-  if (!confirmWorkflowAssetReadiness()) return;
+  if (!(await confirmWorkflowAssetReadiness())) return;
   const form = new FormData(event.currentTarget);
   const workflowId = await ensureWorkflowRegistered();
   const payload = Object.fromEntries(form.entries());

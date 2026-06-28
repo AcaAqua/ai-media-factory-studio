@@ -129,7 +129,7 @@ During generation, matched Workflow asset links are applied only to the copied C
 
 The generation screen previews which matched assets will be applied and which required assets are still missing before submission.
 
-If required assets are missing or the selected Workflow has not been scanned yet, Studio asks for confirmation before submitting to ComfyUI.
+If required assets are missing or the selected Workflow has not been scanned yet, Studio shows a pre-submit warning dialog with shortcuts to the Models view and required asset scan.
 
 Users are still responsible for reviewing license terms, model safety, and local placement before using third-party assets.
 

@@ -612,6 +612,20 @@
           </div>
         </form>
       </dialog>
+
+      <dialog class="recipe-dialog wide-dialog" id="workflowAssetWarningDialog">
+        <form method="dialog">
+          <h2>Workflow資産確認</h2>
+          <p class="note" id="workflowAssetWarningMessage"></p>
+          <div class="asset-registry-list" id="workflowAssetWarningList"></div>
+          <div class="dialog-actions">
+            <button class="secondary" type="button" id="workflowAssetWarningGoModels">モデル画面へ移動</button>
+            <button class="secondary" type="button" id="workflowAssetWarningScan">不足検知を実行</button>
+            <button class="danger" type="button" id="workflowAssetWarningContinue">それでも送信</button>
+            <button class="secondary" type="button" id="workflowAssetWarningCancel">キャンセル</button>
+          </div>
+        </form>
+      </dialog>
     </div>
 
     <script src="/app.js" type="module"></script>
