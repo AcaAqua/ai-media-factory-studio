@@ -345,6 +345,10 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .asset-registry-card.missing {
   border-color: rgba(255, 205, 97, .45);
 }
+.asset-registry-card.recent {
+  border-color: rgba(112, 214, 255, .7);
+  box-shadow: 0 0 0 1px rgba(112, 214, 255, .18) inset;
+}
 .asset-registry-card p {
   margin: 0;
   color: var(--muted);

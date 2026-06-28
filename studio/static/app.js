@@ -18,6 +18,7 @@ let setupStatus = null;
 let databaseBackups = [];
 let activeAssetRegistryItem = null;
 let lastCivitaiLookup = null;
+let lastDownloadedAssetId = "";
 
 const FIELD_LABELS = {
   positive_prompt: "Positive Prompt",
@@ -797,7 +798,7 @@ function renderAssetRegistry() {
     </article>
   `).join("");
   const itemHtml = items.slice(0, 80).map((item) => `
-    <article class="asset-registry-card ${item.missing ? "missing" : ""}">
+    <article class="asset-registry-card ${item.missing ? "missing" : ""} ${item.item_id === lastDownloadedAssetId ? "recent" : ""}">
       <header>
         <strong>${escapeHtml(item.name)}</strong>
         <span class="chip ${item.missing ? "warn" : "ok"}">${escapeHtml(assetKindLabel(item.asset_kind))}</span>
@@ -865,6 +866,7 @@ async function scanWorkflowRequirements() {
     assetRegistry.requirements = result.requirements || [];
     assetRegistry.requirement_counts = result.counts || [];
     renderWorkflowRequirements();
+    return result;
   } finally {
     $("#scanWorkflowRequirements").disabled = false;
   }
@@ -873,6 +875,7 @@ async function scanWorkflowRequirements() {
 async function refreshAssetRegistry() {
   assetRegistry = await api("/api/asset-registry");
   renderAssetRegistry();
+  renderWorkflowRequirements();
 }
 
 function openAssetRegistryItem(itemId) {
@@ -1162,14 +1165,36 @@ async function downloadCivitaiAsset() {
     });
     const item = result.item;
     if (item) {
+      lastDownloadedAssetId = item.item_id;
       assetRegistry.items = [
         item,
         ...(assetRegistry.items || []).filter((existing) => existing.item_id !== item.item_id),
       ];
       renderAssetRegistry();
     }
-    alert(`ダウンロードして資産台帳へ登録しました: ${result.file?.name || item?.file_name || "file"}`);
+    await refreshAssetRegistry();
+    const requirementResult = await scanWorkflowRequirements();
+    const matched = requirementResult?.scan_summary?.matched ?? 0;
+    const missing = requirementResult?.scan_summary?.missing ?? 0;
     await planCivitaiDownload();
+    const panel = $("#civitaiDownloadPlan");
+    if (panel) {
+      panel.insertAdjacentHTML("afterbegin", `
+        <article class="storage-card">
+          <header>
+            <strong>登録完了</strong>
+            <span class="chip ok">needs_review</span>
+          </header>
+          <p>${escapeHtml(result.file?.name || item?.file_name || "file")} を資産台帳へ登録しました。</p>
+          <p>Workflow要求資産を再照合しました。matched ${escapeHtml(matched)} / missing ${escapeHtml(missing)}</p>
+          <div class="action-row">
+            <button type="button" data-edit-registry-item="${escapeHtml(item?.item_id || "")}">登録資産を確認</button>
+          </div>
+        </article>
+      `);
+    }
+    if (item?.item_id) openAssetRegistryItem(item.item_id);
+    alert(`ダウンロードして資産台帳へ登録しました: ${result.file?.name || item?.file_name || "file"}`);
   } finally {
     if (button) {
       button.disabled = false;

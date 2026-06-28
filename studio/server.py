@@ -768,12 +768,37 @@ def list_asset_registry() -> dict[str, Any]:
             ORDER BY asset_kind, missing
             """,
         )
+        requirements = rows(
+            con,
+            """
+            SELECT r.*, i.name AS matched_name, i.relative_path AS matched_relative_path
+            FROM workflow_asset_requirements r
+            LEFT JOIN asset_registry_items i ON i.item_id = r.matched_item_id
+            ORDER BY
+              CASE r.status WHEN 'missing' THEN 0 WHEN 'matched' THEN 1 ELSE 2 END,
+              r.workflow_name,
+              r.asset_kind,
+              r.asset_name
+            LIMIT 500
+            """,
+        )
+        requirement_counts = rows(
+            con,
+            """
+            SELECT status, asset_kind, COUNT(*) AS count
+            FROM workflow_asset_requirements
+            GROUP BY status, asset_kind
+            ORDER BY status, asset_kind
+            """,
+        )
     return {
         "ok": True,
         "locations": [asset_registry_location_status(item) for item in locations],
         "items": items,
         "scan_runs": scan_runs,
         "counts": counts,
+        "requirements": requirements,
+        "requirement_counts": requirement_counts,
     }
 
 
