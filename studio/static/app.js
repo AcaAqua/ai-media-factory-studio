@@ -13,6 +13,7 @@ let boardAssets = [];
 let boardLoaded = false;
 let civitaiConfig = null;
 let promptTranslation = { terms: [], presets: [], history: [], last: null };
+let promptExtraction = null;
 let assetRegistry = { locations: [], items: [], scan_runs: [] };
 let setupStatus = null;
 let databaseBackups = [];
@@ -1587,6 +1588,76 @@ function applyPromptTranslation() {
   $("#translationStatus").textContent = "生成Promptへ反映しました。";
 }
 
+function renderPromptExtraction(result) {
+  const panel = $("#promptExtractResult");
+  if (!panel) return;
+  if (!result) {
+    panel.innerHTML = "";
+    return;
+  }
+  if (!result.ok) {
+    panel.innerHTML = `<div class="empty-state">抽出できませんでした: ${escapeHtml(result.error || "unknown error")}</div>`;
+    return;
+  }
+  panel.innerHTML = `
+    <article class="asset-link-preview-card">
+      <header>
+        <strong>${escapeHtml(result.filename || "uploaded file")}</strong>
+        <span class="chip ${result.warnings?.length ? "warn" : "ok"}">${escapeHtml(result.media_type || "-")} / ${escapeHtml(result.source || "-")}</span>
+      </header>
+      <label class="field">
+        <span>Positive候補</span>
+        <textarea id="extractedPositivePrompt" rows="4" readonly>${escapeHtml(result.positive_prompt || "")}</textarea>
+      </label>
+      <label class="field">
+        <span>Negative候補</span>
+        <textarea id="extractedNegativePrompt" rows="2" readonly>${escapeHtml(result.negative_prompt || "")}</textarea>
+      </label>
+      ${result.settings ? `<p class="note">${escapeHtml(result.settings)}</p>` : ""}
+      ${(result.warnings || []).length ? `<div class="warning-text">${result.warnings.map((item) => `<p>${escapeHtml(item)}</p>`).join("")}</div>` : ""}
+      <details>
+        <summary>検出metadata ${escapeHtml((result.metadata || []).length)}件</summary>
+        <div class="file-list">
+          ${(result.metadata || []).slice(0, 24).map((item) => `
+            <div>
+              <strong>${escapeHtml(item.key)}</strong>
+              <span>${escapeHtml(item.value)}</span>
+            </div>
+          `).join("") || `<p class="note">metadataなし</p>`}
+        </div>
+      </details>
+    </article>
+  `;
+}
+
+async function extractPromptFromFile() {
+  const input = $("#promptExtractFile");
+  const file = input?.files?.[0];
+  if (!file) {
+    alert("抽出する画像または動画を選択してください。");
+    return;
+  }
+  $("#promptExtractResult").innerHTML = `<div class="empty-state">抽出しています...</div>`;
+  const form = new FormData();
+  form.append("file", file);
+  const response = await fetch("/api/prompt-extract", { method: "POST", body: form });
+  const result = await response.json();
+  if (!response.ok || result.error) throw new Error(result.error || "prompt extraction failed");
+  promptExtraction = result;
+  renderPromptExtraction(result);
+}
+
+function applyExtractedPrompt() {
+  if (!promptExtraction) {
+    alert("先にPrompt抽出を実行してください。");
+    return;
+  }
+  const form = $("#generateForm");
+  if (promptExtraction.positive_prompt) form.elements.prompt.value = promptExtraction.positive_prompt;
+  if (promptExtraction.negative_prompt) form.elements.negative_prompt.value = promptExtraction.negative_prompt;
+  $("#translationStatus").textContent = "抽出Promptを生成Promptへ反映しました。";
+}
+
 async function openTranslationTerms() {
   await refreshTranslationTerms(false);
   $("#translationTermsDialog").showModal();
@@ -2632,6 +2703,11 @@ $("#convertPromptTranslation").addEventListener("click", () => convertPromptTran
   $("#translationStatus").textContent = `変換できませんでした: ${error.message}`;
 }));
 $("#applyPromptTranslation").addEventListener("click", applyPromptTranslation);
+$("#extractPromptFromFile").addEventListener("click", () => extractPromptFromFile().catch((error) => {
+  promptExtraction = null;
+  renderPromptExtraction({ ok: false, error: error.message });
+}));
+$("#applyExtractedPrompt").addEventListener("click", applyExtractedPrompt);
 $("#openTranslationTerms").addEventListener("click", () => openTranslationTerms().catch((error) => alert(error.message)));
 $("#openTranslationHistory").addEventListener("click", () => openTranslationHistory().catch((error) => alert(error.message)));
 $("#translationTermSearch").addEventListener("input", renderTranslationTerms);

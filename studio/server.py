@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import cgi
 import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -11,6 +13,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -39,6 +42,9 @@ CIVITAI_API = "https://civitai.com/api/v1"
 CLIENT_ID = "ai-media-factory-studio"
 REQUIRED_MAPPINGS = ("positive_prompt", "seed", "width", "height", "output")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+PROMPT_EXTRACT_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
+PROMPT_EXTRACT_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi"}
+PROMPT_EXTRACT_MAX_BYTES = 512 * 1024 * 1024
 CONTENT_SCOPES = {"sfw", "sensitive", "adult_local"}
 STORAGE_SCOPES = {"general", "sensitive", "adult_local"}
 STORAGE_USAGE_TYPES = {"generated", "references", "exports", "thumbnails", "backups"}
@@ -2663,6 +2669,198 @@ def convert_prompt_translation(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def parse_a1111_parameters(value: str) -> dict[str, str]:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    result = {"positive_prompt": "", "negative_prompt": "", "settings": ""}
+    if not text:
+        return result
+    negative_marker = "\nNegative prompt:"
+    settings_marker = "\nSteps:"
+    if negative_marker in text:
+        positive, rest = text.split(negative_marker, 1)
+        result["positive_prompt"] = positive.strip()
+        if settings_marker in rest:
+            negative, settings = rest.split(settings_marker, 1)
+            result["negative_prompt"] = negative.strip()
+            result["settings"] = ("Steps:" + settings).strip()
+        else:
+            result["negative_prompt"] = rest.strip()
+    elif settings_marker in text:
+        positive, settings = text.split(settings_marker, 1)
+        result["positive_prompt"] = positive.strip()
+        result["settings"] = ("Steps:" + settings).strip()
+    else:
+        result["positive_prompt"] = text
+    return result
+
+
+def parse_comfy_workflow_metadata(value: str) -> dict[str, Any]:
+    try:
+        workflow = json.loads(value)
+    except Exception:
+        return {"positive_prompt": "", "negative_prompt": "", "texts": []}
+    nodes = workflow.get("nodes") if isinstance(workflow, dict) else None
+    if not isinstance(nodes, list):
+        return {"positive_prompt": "", "negative_prompt": "", "texts": []}
+    texts = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        class_type = str(node.get("type") or node.get("class_type") or "")
+        widgets = node.get("widgets_values")
+        if "cliptextencode" not in class_type.lower() or not isinstance(widgets, list):
+            continue
+        text = next((str(value).strip() for value in widgets if isinstance(value, str) and value.strip()), "")
+        if text:
+            texts.append({"node_id": str(node.get("id") or ""), "class_type": class_type, "text": text})
+    positive = texts[0]["text"] if texts else ""
+    negative = texts[1]["text"] if len(texts) > 1 else ""
+    return {"positive_prompt": positive, "negative_prompt": negative, "texts": texts}
+
+
+def parse_comfy_prompt_metadata(value: str) -> dict[str, Any]:
+    try:
+        workflow = json.loads(value)
+    except Exception:
+        return {"positive_prompt": "", "negative_prompt": "", "texts": []}
+    if not isinstance(workflow, dict):
+        return {"positive_prompt": "", "negative_prompt": "", "texts": []}
+
+    def node_text(ref: Any) -> str:
+        node_id = str(ref[0]) if isinstance(ref, list) and ref else str(ref)
+        node = workflow.get(node_id)
+        if not isinstance(node, dict):
+            return ""
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        return str(inputs.get("text") or "").strip() if "text" in inputs else ""
+
+    positive = ""
+    negative = ""
+    for node in workflow.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        class_type = str(node.get("class_type") or "").lower()
+        if "ksampler" in class_type:
+            positive = positive or node_text(inputs.get("positive"))
+            negative = negative or node_text(inputs.get("negative"))
+    texts = []
+    for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        if "text" in inputs:
+            texts.append({"node_id": node_id, "class_type": str(node.get("class_type") or ""), "text": str(inputs.get("text") or "").strip()})
+    if not positive:
+        positive = next((item["text"] for item in texts if item["text"]), "")
+    return {"positive_prompt": positive, "negative_prompt": negative, "texts": texts}
+
+
+def compact_metadata_value(value: Any, limit: int = 5000) -> str:
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value)
+    return text.replace("\x00", "").strip()[:limit]
+
+
+def prompt_result_from_metadata(filename: str, media_type: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    metadata_items = [{"key": key, "value": compact_metadata_value(value)} for key, value in metadata.items() if value not in (None, "")]
+    lower = {str(key).lower(): compact_metadata_value(value) for key, value in metadata.items()}
+    positive = negative = settings = source = ""
+    if lower.get("parameters"):
+        parsed = parse_a1111_parameters(lower["parameters"])
+        positive, negative, settings = parsed["positive_prompt"], parsed["negative_prompt"], parsed["settings"]
+        source = "parameters"
+    if not positive and lower.get("prompt"):
+        comfy = parse_comfy_prompt_metadata(lower["prompt"])
+        if comfy["positive_prompt"] or comfy["negative_prompt"]:
+            positive, negative = comfy["positive_prompt"], comfy["negative_prompt"]
+            source = "comfy_prompt"
+        else:
+            positive = lower["prompt"]
+            source = "prompt"
+    if not positive and lower.get("workflow"):
+        comfy_workflow = parse_comfy_workflow_metadata(lower["workflow"])
+        if comfy_workflow["positive_prompt"] or comfy_workflow["negative_prompt"]:
+            positive, negative = comfy_workflow["positive_prompt"], comfy_workflow["negative_prompt"]
+            source = "comfy_workflow"
+    if not positive:
+        for key in ["description", "comment", "usercomment", "positive"]:
+            if lower.get(key):
+                positive = lower[key]
+                source = key
+                break
+    if not negative:
+        for key in ["negative", "negative_prompt", "negative prompt"]:
+            if lower.get(key):
+                negative = lower[key]
+                break
+    return {
+        "ok": True,
+        "filename": filename,
+        "media_type": media_type,
+        "positive_prompt": positive,
+        "negative_prompt": negative,
+        "settings": settings,
+        "source": source or "metadata",
+        "metadata": metadata_items[:80],
+        "warnings": [] if positive or negative else ["Prompt-like metadata was not found."],
+    }
+
+
+def extract_image_prompt_metadata(filename: str, data: bytes) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    try:
+        from PIL import ExifTags, Image
+
+        with Image.open(io.BytesIO(data)) as image:
+            metadata.update({key: value for key, value in image.info.items() if isinstance(value, (str, bytes, int, float))})
+            try:
+                for tag_id, value in image.getexif().items():
+                    metadata[str(ExifTags.TAGS.get(tag_id, tag_id))] = value
+            except Exception:
+                pass
+    except Exception as exc:
+        return {"ok": False, "filename": filename, "error": f"image metadata extraction failed: {exc}"}
+    return prompt_result_from_metadata(filename, "image", metadata)
+
+
+def extract_video_prompt_metadata(filename: str, data: bytes, extension: str) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return {"ok": False, "filename": filename, "error": "ffprobe was not found"}
+    with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    try:
+        completed = subprocess.run(
+            [ffprobe, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            return {"ok": False, "filename": filename, "error": completed.stderr.strip() or "ffprobe failed"}
+        payload = json.loads(completed.stdout or "{}")
+        metadata.update(((payload.get("format") or {}).get("tags") or {}) if isinstance(payload, dict) else {})
+        for index, stream in enumerate(payload.get("streams") or []):
+            for key, value in (stream.get("tags") or {}).items():
+                metadata[f"stream{index}.{key}"] = value
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+    return prompt_result_from_metadata(filename, "video", metadata)
+
+
+def extract_prompt_from_upload(filename: str, data: bytes) -> dict[str, Any]:
+    extension = Path(filename).suffix.lower()
+    if len(data) > PROMPT_EXTRACT_MAX_BYTES:
+        raise ValueError("file is too large")
+    if extension in PROMPT_EXTRACT_IMAGE_EXTENSIONS:
+        return extract_image_prompt_metadata(filename, data)
+    if extension in PROMPT_EXTRACT_VIDEO_EXTENSIONS:
+        return extract_video_prompt_metadata(filename, data, extension)
+    raise ValueError("unsupported file type")
+
+
 def create_prompt_translation_term(payload: dict[str, Any]) -> dict[str, Any]:
     source_text = str(payload.get("source_text") or "").strip()
     target_text = str(payload.get("target_text") or "").strip()
@@ -2952,6 +3150,29 @@ class Handler(SimpleHTTPRequestHandler):
         raw = self.rfile.read(length).decode("utf-8")
         return json.loads(raw) if raw else {}
 
+    def read_uploaded_file(self) -> tuple[str, bytes]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            raise ValueError("upload file is required")
+        if length > PROMPT_EXTRACT_MAX_BYTES:
+            raise ValueError("uploaded file is too large")
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
+        )
+        if "file" not in form:
+            raise ValueError("file field is required")
+        field = form["file"]
+        if isinstance(field, list):
+            field = field[0] if field else None
+        if field is None or not getattr(field, "filename", ""):
+            raise ValueError("file field is required")
+        data = field.file.read()
+        if not data:
+            raise ValueError("uploaded file is empty")
+        return Path(field.filename).name, data
+
     def do_GET(self) -> None:
         if self.path.startswith("/api/bootstrap"):
             self.send_json(bootstrap())
@@ -3113,6 +3334,10 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if self.path == "/api/prompt-translation/convert":
                 self.send_json(convert_prompt_translation(self.read_body()))
+                return
+            if self.path == "/api/prompt-extract":
+                filename, data = self.read_uploaded_file()
+                self.send_json(extract_prompt_from_upload(filename, data))
                 return
             if self.path == "/api/prompt-translation/terms":
                 self.send_json(create_prompt_translation_term(self.read_body()))

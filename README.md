@@ -137,6 +137,12 @@ Studio can also search Civitai models from the Models view, show candidate cards
 
 Users are still responsible for reviewing license terms, model safety, and local placement before using third-party assets.
 
+## Prompt Extraction from Media
+
+The generation screen can extract prompt candidates from uploaded image or video metadata. This is a local metadata reader, not AI-based image captioning. Uploaded files are parsed in memory, or via a temporary local file for video metadata probing, and are not saved to the Studio library.
+
+Supported inputs include PNG, JPEG, WebP, GIF, BMP, TIFF, MP4, MOV, M4V, WebM, MKV, and AVI when prompt-like metadata is present. Studio recognizes common Automatic1111 `parameters`, ComfyUI prompt/workflow metadata, and general description/comment fields, then lets the user manually apply the extracted Positive and Negative prompts to the generation form.
+
 ## Roadmap
 
 See `docs/roadmap.md` for the local app roadmap. The current direction keeps ComfyUI and Ollama as external integrations while moving models, LoRA files, workflows, and other assets toward a Studio-managed registry that can scan both Studio-standard folders and existing external folders without forced file relocation.

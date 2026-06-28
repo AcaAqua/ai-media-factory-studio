@@ -371,6 +371,18 @@
               <div class="chip-list" id="translationUnconverted"></div>
             </div>
             <p class="note" id="translationStatus">Ollamaや外部APIを使わず、Studio内辞書だけで変換します。</p>
+            <div class="civitai-apply">
+              <label class="field">
+                <span>画像/動画からPrompt抽出</span>
+                <input id="promptExtractFile" type="file" accept=".png,.jpg,.jpeg,.webp,.gif,.bmp,.tiff,.mp4,.mov,.m4v,.webm,.mkv,.avi,image/*,video/*">
+              </label>
+              <div class="mapping-actions">
+                <button class="panel-action" type="button" id="extractPromptFromFile">抽出</button>
+                <button class="panel-action" type="button" id="applyExtractedPrompt">生成Promptへ反映</button>
+              </div>
+              <div id="promptExtractResult" class="prompt-extract-result"></div>
+              <p class="note">PNG/WebP/JPEG等の画像メタデータ、動画コンテナmetadataからPrompt候補を抽出します。ファイルは保存しません。</p>
+            </div>
           </div>
         </section>
         <section class="dock-panel" data-panel="ollama">
