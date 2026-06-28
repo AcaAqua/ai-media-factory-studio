@@ -14,6 +14,7 @@
 - Applied matched Workflow asset links to the copied ComfyUI execution payload during generation.
 - Added generation-screen preview of matched and missing Workflow asset links before submission.
 - Added a detailed pre-submit Workflow asset warning dialog with shortcuts to the Models view and required asset scan.
+- Added a shortcut from missing Workflow assets to Civitai lookup guidance and search.
 - Improved `scripts/start_studio.ps1` to reuse an already running Studio server or start it in the background and open the browser.
 
 ## v0.1.9 - 2026-06-27

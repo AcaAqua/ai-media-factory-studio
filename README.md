@@ -131,6 +131,8 @@ The generation screen previews which matched assets will be applied and which re
 
 If required assets are missing or the selected Workflow has not been scanned yet, Studio shows a pre-submit warning dialog with shortcuts to the Models view and required asset scan.
 
+Missing Workflow assets can be sent to the Civitai lookup area as search guidance, so users can find the asset page, paste its URL, and proceed through the safe download flow.
+
 Users are still responsible for reviewing license terms, model safety, and local placement before using third-party assets.
 
 ## Roadmap

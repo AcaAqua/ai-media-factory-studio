@@ -750,6 +750,9 @@ function openWorkflowAssetWarningDialog({ message, requirements = [], allowScan 
           </header>
           <p>${escapeHtml(item.workflow_name)} / node ${escapeHtml(item.node_id)} / ${escapeHtml(item.class_type)}</p>
           <p>${escapeHtml(item.input_key)}</p>
+          <div class="action-row">
+            <button type="button" data-civitai-missing-asset="${escapeHtml(item.asset_name)}" data-civitai-missing-kind="${escapeHtml(item.asset_kind)}">Civitai検索へ送る</button>
+          </div>
         </article>
       `).join("")}</div>`
     : `<div class="empty-state">不足資産の詳細はまだありません。</div>`;
@@ -789,6 +792,26 @@ function openWorkflowAssetWarningDialog({ message, requirements = [], allowScan 
     };
     dialog.showModal();
   });
+}
+
+function sendMissingAssetToCivitaiSearch(assetName, assetKind = "") {
+  const name = String(assetName || "").trim();
+  const kind = String(assetKind || "").trim();
+  if (!name) return;
+  $("#workflowAssetWarningDialog")?.close();
+  switchView("models");
+  const input = $("#civitaiUrl");
+  const hint = $("#civitaiLookupHint");
+  const query = [name, assetKindLabel(kind)].filter(Boolean).join(" ");
+  if (input) {
+    input.value = "";
+    input.placeholder = `Civitai URLを貼付: ${query}`;
+    input.focus();
+  }
+  if (hint) {
+    const encoded = encodeURIComponent(query);
+    hint.innerHTML = `不足資産: <strong>${escapeHtml(query)}</strong>。Civitaiで該当モデル/LoRAを開き、URLを貼り付けてください。 <a href="https://civitai.com/search/models?sortBy=models_v9&query=${encoded}" target="_blank" rel="noreferrer">Civitai検索を開く</a>`;
+  }
 }
 
 function renderModels() {
@@ -2479,6 +2502,8 @@ document.addEventListener("click", (event) => {
   if (linkWorkflowAssetButton) linkWorkflowRequirementAsset(linkWorkflowAssetButton.dataset.linkWorkflowAsset).catch((error) => alert(error.message));
   const clearWorkflowAssetButton = event.target.closest("[data-clear-workflow-asset]");
   if (clearWorkflowAssetButton) clearWorkflowRequirementAsset(clearWorkflowAssetButton.dataset.clearWorkflowAsset).catch((error) => alert(error.message));
+  const civitaiMissingAssetButton = event.target.closest("[data-civitai-missing-asset]");
+  if (civitaiMissingAssetButton) sendMissingAssetToCivitaiSearch(civitaiMissingAssetButton.dataset.civitaiMissingAsset, civitaiMissingAssetButton.dataset.civitaiMissingKind);
   const openRestoreButton = event.target.closest("#openDatabaseRestoreDialog");
   if (openRestoreButton) openDatabaseRestoreDialog().catch((error) => alert(error.message));
   const setupActionButton = event.target.closest("[data-setup-action]");
