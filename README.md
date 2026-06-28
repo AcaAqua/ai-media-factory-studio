@@ -127,6 +127,8 @@ Valid existing Workflow asset links are preserved during required asset rescans,
 
 During generation, matched Workflow asset links are applied only to the copied ComfyUI execution payload. The original Workflow JSON file is not modified.
 
+The generation screen previews which matched assets will be applied and which required assets are still missing before submission.
+
 Users are still responsible for reviewing license terms, model safety, and local placement before using third-party assets.
 
 ## Roadmap

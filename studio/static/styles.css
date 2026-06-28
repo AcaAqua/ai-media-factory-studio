@@ -279,7 +279,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   gap: 8px;
   margin-top: 10px;
 }
-.comparison-card, .storage-card, .diagnostic-card, .civitai-card, .asset-registry-card, .setup-step {
+.comparison-card, .storage-card, .diagnostic-card, .civitai-card, .asset-registry-card, .asset-link-preview-card, .setup-step {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: #101416;
@@ -287,7 +287,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   display: grid;
   gap: 8px;
 }
-.comparison-card header, .storage-card header, .diagnostic-card header, .civitai-card header, .asset-registry-card header, .setup-step header {
+.comparison-card header, .storage-card header, .diagnostic-card header, .civitai-card header, .asset-registry-card header, .asset-link-preview-card header, .setup-step header {
   display: flex;
   justify-content: space-between;
   gap: 8px;
@@ -326,6 +326,10 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .download-progress {
   display: grid;
   gap: 6px;
+}
+.asset-link-preview {
+  display: grid;
+  gap: 8px;
 }
 .download-progress progress {
   width: 100%;

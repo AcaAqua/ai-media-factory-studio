@@ -78,6 +78,7 @@ function render() {
   renderDiagnostics();
   renderStorage();
   renderMappingTable();
+  renderAssetLinkPreview();
   renderPromptTranslation();
   updateScopeWarning();
 }
@@ -665,6 +666,50 @@ function renderMappingTable() {
   status.textContent = savedFields.length ? `保存済み: ${savedFields.join(" / ")}` : "保存済みマッピングはありません。";
 }
 
+function selectedWorkflowRecord() {
+  const workflowId = selectedRegisteredWorkflowId();
+  if (!workflowId) return null;
+  return (state.workflows || []).find((workflow) => workflow.workflow_id === workflowId) || null;
+}
+
+function selectedWorkflowAssetRequirements() {
+  const workflow = selectedWorkflowRecord();
+  if (!workflow) return [];
+  return (assetRegistry.requirements || []).filter((item) => item.workflow_path === workflow.relative_path);
+}
+
+function renderAssetLinkPreview() {
+  const panel = $("#assetLinkPreview");
+  if (!panel) return;
+  const selected = $("#workflowSelect")?.value || "";
+  if (!selected) {
+    panel.innerHTML = `<div class="empty-state">Workflowなし。資産リンク反映はありません。</div>`;
+    return;
+  }
+  if (selected.startsWith("discover:")) {
+    panel.innerHTML = `<div class="empty-state">未登録Workflowです。生成時に登録後、資産チェックで紐付けを確認できます。</div>`;
+    return;
+  }
+  const requirements = selectedWorkflowAssetRequirements();
+  const matched = requirements.filter((item) => item.status === "matched" && item.matched_item_id);
+  const missing = requirements.filter((item) => item.status === "missing");
+  panel.innerHTML = `
+    <article class="asset-link-preview-card">
+      <header>
+        <strong>送信前の資産リンク</strong>
+        <span class="chip ${missing.length ? "warn" : "ok"}">反映 ${matched.length} / 不足 ${missing.length}</span>
+      </header>
+      ${requirements.length ? `
+        <div class="chip-list">
+          ${matched.slice(0, 8).map((item) => `<span class="chip ok">${escapeHtml(assetKindLabel(item.asset_kind))}: ${escapeHtml(item.matched_relative_path || item.asset_name)}</span>`).join("")}
+          ${missing.slice(0, 6).map((item) => `<span class="chip warn">${escapeHtml(assetKindLabel(item.asset_kind))}: ${escapeHtml(item.asset_name)}</span>`).join("")}
+        </div>
+        <p class="note">matched資産はWorkflow原本ではなく、ComfyUI送信用コピーにだけ反映されます。</p>
+      ` : `<p class="note">このWorkflowの必要資産は未検出です。モデル画面の不足検知を実行してください。</p>`}
+    </article>
+  `;
+}
+
 function renderModels() {
   const list = $("#modelList");
   const models = state.connections.ollama.models || [];
@@ -895,6 +940,7 @@ async function scanWorkflowRequirements() {
     assetRegistry.requirements = result.requirements || [];
     assetRegistry.requirement_counts = result.counts || [];
     renderWorkflowRequirements();
+    renderAssetLinkPreview();
     return result;
   } finally {
     $("#scanWorkflowRequirements").disabled = false;
@@ -915,6 +961,7 @@ async function linkWorkflowRequirementAsset(requirementId) {
   assetRegistry.requirements = result.requirements || [];
   assetRegistry.requirement_counts = result.counts || [];
   renderWorkflowRequirements();
+  renderAssetLinkPreview();
 }
 
 async function clearWorkflowRequirementAsset(requirementId) {
@@ -925,12 +972,14 @@ async function clearWorkflowRequirementAsset(requirementId) {
   assetRegistry.requirements = result.requirements || [];
   assetRegistry.requirement_counts = result.counts || [];
   renderWorkflowRequirements();
+  renderAssetLinkPreview();
 }
 
 async function refreshAssetRegistry() {
   assetRegistry = await api("/api/asset-registry");
   renderAssetRegistry();
   renderWorkflowRequirements();
+  renderAssetLinkPreview();
 }
 
 function openAssetRegistryItem(itemId) {
@@ -2380,6 +2429,7 @@ $("#refreshButton").addEventListener("click", async () => {
 $("#workflowSelect").addEventListener("change", () => {
   mappingCandidates = null;
   renderMappingTable();
+  renderAssetLinkPreview();
 });
 $$('input[name="mode"]').forEach((input) => input.addEventListener("change", updateScopeWarning));
 $("#recipeSelect").addEventListener("change", (event) => applyRecipe(event.target.value).catch((error) => alert(error.message)));
