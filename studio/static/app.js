@@ -1047,6 +1047,11 @@ async function lookupCivitai(event) {
         </div>
       </details>
       <div class="civitai-apply">
+        <button class="secondary" type="button" id="planCivitaiDownload">安全DL計画</button>
+        <p class="note">保存先、上書き、scan結果、確認事項を事前確認します。実ファイルはまだダウンロードしません。</p>
+        <div id="civitaiDownloadPlan" class="download-plan"></div>
+      </div>
+      <div class="civitai-apply">
         <div class="chip-list">
           <span class="chip">${escapeHtml(assetKindLabel(kindHint))}候補</span>
           <span class="chip ${bestCandidate ? "ok" : "warn"}">${bestCandidate ? `候補 ${targetAssets.length}件` : "反映先候補なし"}</span>
@@ -1058,6 +1063,54 @@ async function lookupCivitai(event) {
         <button class="secondary" type="button" id="applyCivitaiToAsset">選択資産へ反映</button>
         <p class="note">反映先候補は種別、hash、ファイル名、既存source URLから推定します。出典URL、作者、base model、trigger words等を資産台帳へ反映します。ファイルは移動・ダウンロードしません。</p>
       </div>
+    </article>
+  `;
+}
+
+async function planCivitaiDownload() {
+  if (!lastCivitaiLookup) {
+    alert("先にCivitaiメタデータを確認してください。");
+    return;
+  }
+  const planPanel = $("#civitaiDownloadPlan");
+  planPanel.innerHTML = `<div class="empty-state">安全DL計画を作成しています...</div>`;
+  const result = await api("/api/civitai/download-plan", {
+    method: "POST",
+    body: JSON.stringify({ civitai: lastCivitaiLookup }),
+  });
+  const readyLocations = (result.locations || []).filter((item) => item.path_exists && item.writable && !item.target_path_exists);
+  planPanel.innerHTML = `
+    <article class="storage-card">
+      <header>
+        <strong>${escapeHtml(result.file?.name || "file")}</strong>
+        <span class="chip ${result.blockers?.length ? "warn" : "ok"}">${escapeHtml(assetKindLabel(result.asset_kind))}</span>
+      </header>
+      <p>${escapeHtml(formatBytes(result.file?.size_bytes || 0))} / pickle ${escapeHtml(result.file?.pickle_scan_result || "-")} / virus ${escapeHtml(result.file?.virus_scan_result || "-")}</p>
+      <p>${escapeHtml(result.download_enabled ? "download ready" : "計画のみ。自動ダウンロードは未実装です。")}</p>
+      <div class="chip-list">
+        <span class="chip ${readyLocations.length ? "ok" : "warn"}">保存候補 ${readyLocations.length}</span>
+        <span class="chip ${result.blockers?.length ? "warn" : "ok"}">blockers ${(result.blockers || []).length}</span>
+        <span class="chip ${result.warnings?.length ? "warn" : "ok"}">warnings ${(result.warnings || []).length}</span>
+      </div>
+      ${(result.locations || []).length ? `
+        <details open>
+          <summary>保存先候補</summary>
+          <div class="file-list">
+            ${(result.locations || []).map((location) => `
+              <div>
+                <strong>${escapeHtml(location.name)}</strong>
+                <span>${escapeHtml(`${location.base_path} / ${location.path_exists && location.writable ? "ready" : "not ready"} / ${location.target_path_exists ? "exists" : "new"}`)}</span>
+              </div>
+            `).join("")}
+          </div>
+        </details>
+      ` : ""}
+      ${(result.blockers || []).length ? `<div class="warning-text"><strong>Blockers</strong><ul>${result.blockers.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
+      ${(result.warnings || []).length ? `<div class="warning-text"><strong>Warnings</strong><ul>${result.warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
+      <details>
+        <summary>確認事項</summary>
+        <ul>${(result.required_confirmations || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+      </details>
     </article>
   `;
 }
@@ -2094,6 +2147,8 @@ document.addEventListener("click", (event) => {
   if (editRegistryButton) openAssetRegistryItem(editRegistryButton.dataset.editRegistryItem);
   const applyCivitaiButton = event.target.closest("#applyCivitaiToAsset");
   if (applyCivitaiButton) applyCivitaiToAsset().catch((error) => alert(error.message));
+  const planCivitaiButton = event.target.closest("#planCivitaiDownload");
+  if (planCivitaiButton) planCivitaiDownload().catch((error) => alert(error.message));
   const openRestoreButton = event.target.closest("#openDatabaseRestoreDialog");
   if (openRestoreButton) openDatabaseRestoreDialog().catch((error) => alert(error.message));
   const setupActionButton = event.target.closest("[data-setup-action]");

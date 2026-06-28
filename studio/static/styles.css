@@ -319,6 +319,10 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   border-top: 1px solid var(--line);
   padding-top: 10px;
 }
+.download-plan {
+  display: grid;
+  gap: 10px;
+}
 .asset-registry-summary {
   margin: 10px 0;
 }

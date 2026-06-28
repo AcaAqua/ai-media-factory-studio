@@ -111,6 +111,12 @@ http://127.0.0.1:8765/
 9. Open Workflow input mapping and save mappings before real generation.
 10. Configure Adult Local storage only if the directory is inside the ComfyUI output root.
 
+## Civitai Metadata and Download Planning
+
+Studio can look up Civitai metadata and prepare a local download safety plan. The plan checks the selected file metadata, target asset registry locations, overwrite risk, Civitai scan results, and required user confirmations.
+
+Automatic model or LoRA downloading is intentionally not enabled yet. Users must review license terms, file safety, and local placement before importing third-party assets.
+
 ## Roadmap
 
 See `docs/roadmap.md` for the local app roadmap. The current direction keeps ComfyUI and Ollama as external integrations while moving models, LoRA files, workflows, and other assets toward a Studio-managed registry that can scan both Studio-standard folders and existing external folders without forced file relocation.
@@ -146,6 +152,6 @@ Public issue reporting should be enabled only after the first public repository 
 - ComfyUI and Ollama are external local services and must be installed and started separately.
 - The launcher is a PowerShell helper, not a signed packaged installer.
 - DB restore is local-only and intentionally requires explicit confirmation text.
-- Model and LoRA downloads are not automated yet.
+- Model and LoRA downloads are not automated yet; Civitai integration currently stops at metadata lookup and safety planning.
 - Video import is reserved for a future version.
 - This project controls Studio only; it does not redistribute ComfyUI, models, custom nodes, or third-party checkpoints.

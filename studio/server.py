@@ -896,6 +896,98 @@ def apply_civitai_to_asset_registry(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def civitai_download_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    civitai = payload.get("civitai") if isinstance(payload.get("civitai"), dict) else {}
+    model = civitai.get("model") if isinstance(civitai.get("model"), dict) else {}
+    version = civitai.get("version") if isinstance(civitai.get("version"), dict) else {}
+    files = version.get("files") if isinstance(version.get("files"), list) else []
+    selected_name = str(payload.get("file_name") or "").strip()
+    selected_file = None
+    if selected_name:
+        selected_file = next((item for item in files if str(item.get("name") or "") == selected_name), None)
+    selected_file = selected_file or next((item for item in files if item.get("download_url")), None) or (files[0] if files else {})
+    if not selected_file:
+        raise ValueError("Civitai file metadata is required")
+
+    asset_kind = asset_kind_from_civitai_type(str(model.get("type") or ""))
+    file_name = Path(str(selected_file.get("name") or f"{safe_slug(model.get('name') or 'civitai_asset')}.safetensors")).name
+    if not file_name or file_name in {".", ".."}:
+        raise ValueError("invalid Civitai file name")
+    extension = Path(file_name).suffix.lower()
+    allowed = ASSET_REGISTRY_EXTENSIONS.get(asset_kind, set())
+    warnings = []
+    blockers = []
+    if allowed and extension not in allowed:
+        warnings.append(f"Unexpected extension for {asset_kind}: {extension or '(none)'}")
+    if model.get("nsfw"):
+        warnings.append("Civitai metadata marks this model as NSFW. Confirm intended local scope before downloading.")
+    pickle_scan = str(selected_file.get("pickle_scan_result") or "").lower()
+    virus_scan = str(selected_file.get("virus_scan_result") or "").lower()
+    if pickle_scan and pickle_scan not in {"success", "clean", "passed"}:
+        warnings.append(f"Pickle scan result needs review: {selected_file.get('pickle_scan_result')}")
+    if virus_scan and virus_scan not in {"success", "clean", "passed"}:
+        blockers.append(f"Virus scan result is not clean: {selected_file.get('virus_scan_result')}")
+    if not selected_file.get("download_url") and not version.get("download_url"):
+        blockers.append("Download URL is missing from Civitai metadata.")
+
+    with db() as con:
+        locations = [
+            asset_registry_location_status(item)
+            for item in rows(
+                con,
+                "SELECT * FROM asset_registry_locations WHERE asset_kind = ? AND is_enabled = 1 ORDER BY is_external, name",
+                (asset_kind,),
+            )
+        ]
+    location_options = []
+    for location in locations:
+        base = Path(location["base_path"])
+        candidate = (base / file_name).resolve() if base.is_absolute() else (ROOT / base / file_name).resolve()
+        path_exists = candidate.exists()
+        if path_exists:
+            warnings.append(f"Target file already exists in {location['name']}. Download must not overwrite it.")
+        location_options.append(
+            {
+                "location_id": location["location_id"],
+                "name": location["name"],
+                "asset_kind": location["asset_kind"],
+                "base_path": location["base_path"],
+                "path_exists": location.get("path_exists"),
+                "writable": location.get("writable"),
+                "target_relative_path": file_name,
+                "target_path_exists": path_exists,
+                "is_external": location.get("is_external"),
+            }
+        )
+    if not location_options:
+        blockers.append(f"No enabled asset registry location for {asset_kind}.")
+    elif not any(item.get("path_exists") and item.get("writable") and not item.get("target_path_exists") for item in location_options):
+        warnings.append("No ready non-overwriting target was found. Register or fix an asset location before downloading.")
+
+    return {
+        "ok": True,
+        "download_enabled": False,
+        "asset_kind": asset_kind,
+        "file": {
+            "name": file_name,
+            "size_bytes": int(float(selected_file.get("size_kb") or 0) * 1024),
+            "download_url": selected_file.get("download_url") or version.get("download_url"),
+            "pickle_scan_result": selected_file.get("pickle_scan_result"),
+            "virus_scan_result": selected_file.get("virus_scan_result"),
+            "hashes": selected_file.get("hashes") or {},
+        },
+        "locations": location_options,
+        "warnings": warnings,
+        "blockers": blockers,
+        "required_confirmations": [
+            "Review the model license and Civitai page terms.",
+            "Confirm the selected file is intended for this local project.",
+            "Confirm no existing file will be overwritten.",
+            "Scan the downloaded file with your local security tools before use.",
+        ],
+    }
+
+
 def workflow_requirement_kind(class_type: str, input_key: str) -> str | None:
     class_lower = class_type.lower()
     key = input_key.lower()
@@ -2531,6 +2623,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if self.path == "/api/civitai/lookup":
                 self.send_json(lookup_civitai_model(self.read_body()))
+                return
+            if self.path == "/api/civitai/download-plan":
+                self.send_json(civitai_download_plan(self.read_body()))
                 return
             if self.path == "/api/civitai/config":
                 self.send_json(save_civitai_config(self.read_body()))

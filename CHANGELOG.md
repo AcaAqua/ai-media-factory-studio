@@ -6,6 +6,7 @@
 - Added first-run setup checklist with required/optional readiness steps and persistent complete/dismiss controls.
 - Added manual SQLite database backup action from the Settings screen.
 - Added guarded database backup listing and restore UI with pre-restore backup creation and explicit confirmation.
+- Added Civitai safe download planning that checks file metadata, target locations, overwrite risk, scan status, and required confirmations without downloading files.
 - Improved `scripts/start_studio.ps1` to reuse an already running Studio server or start it in the background and open the browser.
 
 ## v0.1.9 - 2026-06-27
