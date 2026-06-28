@@ -10,6 +10,7 @@
 - Added post-download asset registry refresh, recent asset highlighting, detail review shortcut, and Workflow required asset resync.
 - Added background Civitai download jobs with progress polling and cancellation.
 - Added manual Workflow required asset linking from registered asset registry items.
+- Preserved existing valid Workflow asset links during required asset rescans.
 - Improved `scripts/start_studio.ps1` to reuse an already running Studio server or start it in the background and open the browser.
 
 ## v0.1.9 - 2026-06-27

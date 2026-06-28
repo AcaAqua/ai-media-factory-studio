@@ -854,6 +854,7 @@ function renderWorkflowRequirements() {
           <p>${escapeHtml(item.workflow_name)} / node ${escapeHtml(item.node_id)} / ${escapeHtml(item.class_type)}</p>
           <p>${escapeHtml(assetKindLabel(item.asset_kind))} / ${escapeHtml(item.input_key)}</p>
           <p>${escapeHtml(item.matched_relative_path || "台帳一致なし")}</p>
+          ${item.matched_item_id ? `<p><span class="chip ok">再スキャン時も保持</span></p>` : ""}
           ${renderWorkflowRequirementPicker(item)}
         </article>
       `).join("") || `<div class="empty-state">まだWorkflow要求資産を検出していません。</div>`}

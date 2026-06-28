@@ -1381,7 +1381,27 @@ def scan_workflow_asset_requirements(payload: dict[str, Any] | None = None) -> d
             active_keys = set()
             for req in requirements:
                 detected += 1
-                match = find_matching_asset_item(con, req["asset_kind"], req["asset_name"])
+                existing_requirement = row(
+                    con,
+                    """
+                    SELECT matched_item_id
+                    FROM workflow_asset_requirements
+                    WHERE workflow_path = ? AND node_id = ? AND input_key = ? AND asset_name = ?
+                    """,
+                    (relative, req["node_id"], req["input_key"], req["asset_name"]),
+                )
+                preserved_match = None
+                if existing_requirement and existing_requirement.get("matched_item_id"):
+                    preserved_match = row(
+                        con,
+                        """
+                        SELECT *
+                        FROM asset_registry_items
+                        WHERE item_id = ? AND asset_kind = ? AND missing = 0
+                        """,
+                        (existing_requirement["matched_item_id"], req["asset_kind"]),
+                    )
+                match = preserved_match or find_matching_asset_item(con, req["asset_kind"], req["asset_name"])
                 status = "matched" if match else "missing"
                 if match:
                     matched += 1
