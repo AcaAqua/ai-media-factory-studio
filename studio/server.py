@@ -741,6 +741,7 @@ def asset_registry_location_status(location: dict[str, Any]) -> dict[str, Any]:
     result = dict(location)
     result["resolved_path"] = str(path)
     result["path_exists"] = path.exists() and path.is_dir()
+    result["writable"] = result["path_exists"] and os.access(path, os.W_OK)
     return result
 
 
@@ -867,6 +868,40 @@ def asset_kind_from_civitai_type(model_type: str) -> str:
     return "checkpoint"
 
 
+def select_civitai_file(civitai: dict[str, Any], selected_name: str = "") -> dict[str, Any]:
+    version = civitai.get("version") if isinstance(civitai.get("version"), dict) else {}
+    files = version.get("files") if isinstance(version.get("files"), list) else []
+    selected = None
+    if selected_name:
+        selected = next((item for item in files if str(item.get("name") or "") == selected_name), None)
+    selected = selected or next((item for item in files if item.get("download_url")), None) or (files[0] if files else {})
+    if not selected:
+        raise ValueError("Civitai file metadata is required")
+    return selected
+
+
+def civitai_expected_sha256(selected_file: dict[str, Any]) -> str:
+    hashes = selected_file.get("hashes") if isinstance(selected_file.get("hashes"), dict) else {}
+    for key, value in hashes.items():
+        if str(key).lower() == "sha256" and str(value or "").strip():
+            return str(value).strip().lower()
+    return ""
+
+
+def civitai_download_url_allowed(download_url: str) -> bool:
+    parsed = urlparse(download_url)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and (host == "civitai.com" or host.endswith(".civitai.com"))
+
+
+def civitai_download_headers() -> dict[str, str]:
+    headers = {"User-Agent": "AI-Media-Factory-Studio/0.2"}
+    token = civitai_api_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def apply_civitai_to_asset_registry(payload: dict[str, Any]) -> dict[str, Any]:
     item_id = str(payload.get("item_id") or "").strip()
     civitai = payload.get("civitai") if isinstance(payload.get("civitai"), dict) else {}
@@ -900,14 +935,8 @@ def civitai_download_plan(payload: dict[str, Any]) -> dict[str, Any]:
     civitai = payload.get("civitai") if isinstance(payload.get("civitai"), dict) else {}
     model = civitai.get("model") if isinstance(civitai.get("model"), dict) else {}
     version = civitai.get("version") if isinstance(civitai.get("version"), dict) else {}
-    files = version.get("files") if isinstance(version.get("files"), list) else []
     selected_name = str(payload.get("file_name") or "").strip()
-    selected_file = None
-    if selected_name:
-        selected_file = next((item for item in files if str(item.get("name") or "") == selected_name), None)
-    selected_file = selected_file or next((item for item in files if item.get("download_url")), None) or (files[0] if files else {})
-    if not selected_file:
-        raise ValueError("Civitai file metadata is required")
+    selected_file = select_civitai_file(civitai, selected_name)
 
     asset_kind = asset_kind_from_civitai_type(str(model.get("type") or ""))
     file_name = Path(str(selected_file.get("name") or f"{safe_slug(model.get('name') or 'civitai_asset')}.safetensors")).name
@@ -927,8 +956,11 @@ def civitai_download_plan(payload: dict[str, Any]) -> dict[str, Any]:
         warnings.append(f"Pickle scan result needs review: {selected_file.get('pickle_scan_result')}")
     if virus_scan and virus_scan not in {"success", "clean", "passed"}:
         blockers.append(f"Virus scan result is not clean: {selected_file.get('virus_scan_result')}")
-    if not selected_file.get("download_url") and not version.get("download_url"):
+    download_url = str(selected_file.get("download_url") or version.get("download_url") or "")
+    if not download_url:
         blockers.append("Download URL is missing from Civitai metadata.")
+    elif not civitai_download_url_allowed(download_url):
+        blockers.append("Download URL is not an allowed Civitai HTTPS URL.")
 
     with db() as con:
         locations = [
@@ -963,15 +995,17 @@ def civitai_download_plan(payload: dict[str, Any]) -> dict[str, Any]:
         blockers.append(f"No enabled asset registry location for {asset_kind}.")
     elif not any(item.get("path_exists") and item.get("writable") and not item.get("target_path_exists") for item in location_options):
         warnings.append("No ready non-overwriting target was found. Register or fix an asset location before downloading.")
+    ready_location = next((item for item in location_options if item.get("path_exists") and item.get("writable") and not item.get("target_path_exists")), None)
 
     return {
         "ok": True,
-        "download_enabled": False,
+        "download_enabled": bool(ready_location and not blockers),
         "asset_kind": asset_kind,
+        "recommended_location_id": ready_location.get("location_id") if ready_location else "",
         "file": {
             "name": file_name,
             "size_bytes": int(float(selected_file.get("size_kb") or 0) * 1024),
-            "download_url": selected_file.get("download_url") or version.get("download_url"),
+            "download_url": download_url,
             "pickle_scan_result": selected_file.get("pickle_scan_result"),
             "virus_scan_result": selected_file.get("virus_scan_result"),
             "hashes": selected_file.get("hashes") or {},
@@ -985,6 +1019,138 @@ def civitai_download_plan(payload: dict[str, Any]) -> dict[str, Any]:
             "Confirm no existing file will be overwritten.",
             "Scan the downloaded file with your local security tools before use.",
         ],
+    }
+
+
+def download_civitai_asset(payload: dict[str, Any]) -> dict[str, Any]:
+    if str(payload.get("confirm_text") or "").strip() != "DOWNLOAD":
+        raise ValueError("confirm_text must be DOWNLOAD")
+
+    civitai = payload.get("civitai") if isinstance(payload.get("civitai"), dict) else {}
+    model = civitai.get("model") if isinstance(civitai.get("model"), dict) else {}
+    version = civitai.get("version") if isinstance(civitai.get("version"), dict) else {}
+    selected_file = select_civitai_file(civitai, str(payload.get("file_name") or "").strip())
+    asset_kind = asset_kind_from_civitai_type(str(model.get("type") or ""))
+    file_name = Path(str(selected_file.get("name") or f"{safe_slug(model.get('name') or 'civitai_asset')}.safetensors")).name
+    if not file_name or file_name in {".", ".."}:
+        raise ValueError("invalid Civitai file name")
+    extension = Path(file_name).suffix.lower()
+    allowed = ASSET_REGISTRY_EXTENSIONS.get(asset_kind, set())
+    if allowed and extension not in allowed:
+        raise ValueError(f"unexpected extension for {asset_kind}: {extension or '(none)'}")
+
+    download_url = str(selected_file.get("download_url") or version.get("download_url") or "")
+    if not download_url:
+        raise ValueError("download URL is missing")
+    if not civitai_download_url_allowed(download_url):
+        raise ValueError("download URL is not an allowed Civitai HTTPS URL")
+
+    virus_scan = str(selected_file.get("virus_scan_result") or "").lower()
+    if virus_scan and virus_scan not in {"success", "clean", "passed"}:
+        raise ValueError(f"virus scan result is not clean: {selected_file.get('virus_scan_result')}")
+
+    location_id = str(payload.get("location_id") or "").strip()
+    if not location_id:
+        raise ValueError("location_id is required")
+
+    with db() as con:
+        location = row(con, "SELECT * FROM asset_registry_locations WHERE location_id = ? AND is_enabled = 1", (location_id,))
+        if not location:
+            raise ValueError("asset registry location not found or disabled")
+        if location["asset_kind"] != asset_kind:
+            raise ValueError(f"location asset kind does not match: {location['asset_kind']} != {asset_kind}")
+
+        base = resolve_asset_location_path(location["base_path"])
+        if not int(location.get("is_external") or 0):
+            base.mkdir(parents=True, exist_ok=True)
+        if not base.exists() or not base.is_dir():
+            raise ValueError("target location path does not exist")
+        if not os.access(base, os.W_OK):
+            raise ValueError("target location is not writable")
+
+        target = (base / file_name).resolve()
+        if not path_under(target, base):
+            raise ValueError("target path escaped the asset location")
+        if target.exists():
+            raise ValueError("target file already exists; refusing to overwrite")
+        existing = row(con, "SELECT item_id FROM asset_registry_items WHERE location_id = ? AND relative_path = ?", (location_id, file_name))
+        if existing:
+            raise ValueError("asset registry item already exists for this target path")
+
+        tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.part")
+        digest = hashlib.sha256()
+        size_bytes = 0
+        try:
+            req = Request(download_url, headers=civitai_download_headers())
+            with urlopen(req, timeout=120) as response, tmp.open("wb") as handle:
+                for chunk in iter(lambda: response.read(1024 * 1024), b""):
+                    handle.write(chunk)
+                    digest.update(chunk)
+                    size_bytes += len(chunk)
+            sha256 = digest.hexdigest()
+            expected_sha256 = civitai_expected_sha256(selected_file)
+            if expected_sha256 and sha256.lower() != expected_sha256:
+                tmp.unlink(missing_ok=True)
+                raise ValueError("downloaded file SHA256 does not match Civitai metadata")
+            if target.exists():
+                tmp.unlink(missing_ok=True)
+                raise ValueError("target file appeared during download; refusing to overwrite")
+            tmp.replace(target)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+
+        trained_words = version.get("trained_words") if isinstance(version.get("trained_words"), list) else []
+        tags = model.get("tags") if isinstance(model.get("tags"), list) else []
+        notes = [
+            f"Civitai model: {model.get('name') or '-'}",
+            f"Civitai version: {version.get('name') or '-'}",
+        ]
+        if trained_words:
+            notes.append(f"Trigger words: {', '.join(str(item) for item in trained_words[:12])}")
+        if tags:
+            notes.append(f"Tags: {', '.join(str(item) for item in tags[:16])}")
+        item_id = new_id("ari")
+        con.execute(
+            """
+            INSERT INTO asset_registry_items
+              (item_id, location_id, asset_kind, name, relative_path, file_name, extension, size_bytes,
+               sha256, source_url, creator, base_model, status, notes, missing, last_seen_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'needs_review', ?, 0, datetime('now'), datetime('now'))
+            """,
+            (
+                item_id,
+                location_id,
+                asset_kind,
+                Path(file_name).stem,
+                file_name,
+                file_name,
+                extension,
+                size_bytes,
+                sha256,
+                str(civitai.get("source_url") or ""),
+                str(model.get("creator") or ""),
+                str(version.get("base_model") or ""),
+                "\n".join(notes),
+            ),
+        )
+        con.execute("UPDATE asset_registry_locations SET last_scanned_at = datetime('now'), updated_at = datetime('now') WHERE location_id = ?", (location_id,))
+        item = row(
+            con,
+            """
+            SELECT i.*, l.name AS location_name, l.base_path AS location_base_path
+            FROM asset_registry_items i
+            LEFT JOIN asset_registry_locations l ON l.location_id = i.location_id
+            WHERE i.item_id = ?
+            """,
+            (item_id,),
+        )
+
+    return {
+        "ok": True,
+        "item": item,
+        "file": {"name": file_name, "size_bytes": size_bytes, "sha256": item.get("sha256") if item else ""},
+        "warnings": ["Downloaded file is registered as needs_review. Review license and compatibility before use."],
     }
 
 
@@ -2626,6 +2792,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if self.path == "/api/civitai/download-plan":
                 self.send_json(civitai_download_plan(self.read_body()))
+                return
+            if self.path == "/api/civitai/download":
+                self.send_json(download_civitai_asset(self.read_body()))
                 return
             if self.path == "/api/civitai/config":
                 self.send_json(save_civitai_config(self.read_body()))
