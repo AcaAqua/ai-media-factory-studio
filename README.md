@@ -117,6 +117,8 @@ Studio can look up Civitai metadata and prepare a local download safety plan. Th
 
 After reviewing the plan, users can choose a registered asset location and type `DOWNLOAD` to download the selected file. Studio refuses to overwrite existing files, verifies SHA256 when Civitai metadata provides it, and registers the saved file in the asset registry as `needs_review`.
 
+Downloads run as local background jobs with progress polling and a cancel action. Cancelled or failed downloads do not register an asset.
+
 After a successful download, Studio refreshes the asset registry, highlights the newly registered asset, opens its detail review dialog, and resyncs Workflow required asset matches.
 
 Users are still responsible for reviewing license terms, model safety, and local placement before using third-party assets.

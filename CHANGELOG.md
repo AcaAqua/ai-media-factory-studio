@@ -8,6 +8,7 @@
 - Added guarded database backup listing and restore UI with pre-restore backup creation and explicit confirmation.
 - Added Civitai safe download flow with target location selection, explicit `DOWNLOAD` confirmation, no-overwrite saving, SHA256 verification when available, and automatic asset registry registration as `needs_review`.
 - Added post-download asset registry refresh, recent asset highlighting, detail review shortcut, and Workflow required asset resync.
+- Added background Civitai download jobs with progress polling and cancellation.
 - Improved `scripts/start_studio.ps1` to reuse an already running Studio server or start it in the background and open the browser.
 
 ## v0.1.9 - 2026-06-27

@@ -53,6 +53,8 @@ ASSET_REGISTRY_EXTENSIONS = {
     "upscaler": {".pth", ".pt", ".safetensors", ".onnx"},
     "workflow": {".json"},
 }
+CIVITAI_DOWNLOAD_JOBS: dict[str, dict[str, Any]] = {}
+CIVITAI_DOWNLOAD_JOBS_LOCK = threading.Lock()
 
 
 def now_iso() -> str:
@@ -1047,7 +1049,11 @@ def civitai_download_plan(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def download_civitai_asset(payload: dict[str, Any]) -> dict[str, Any]:
+def download_civitai_asset(
+    payload: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+    progress: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if str(payload.get("confirm_text") or "").strip() != "DOWNLOAD":
         raise ValueError("confirm_text must be DOWNLOAD")
 
@@ -1108,10 +1114,32 @@ def download_civitai_asset(payload: dict[str, Any]) -> dict[str, Any]:
         try:
             req = Request(download_url, headers=civitai_download_headers())
             with urlopen(req, timeout=120) as response, tmp.open("wb") as handle:
+                total_header = response.headers.get("Content-Length") or ""
+                total_bytes = int(total_header) if total_header.isdigit() else 0
+                if progress is not None:
+                    progress.update(
+                        {
+                            "status": "running",
+                            "file_name": file_name,
+                            "location_id": location_id,
+                            "total_bytes": total_bytes,
+                            "downloaded_bytes": 0,
+                            "percent": 0,
+                        }
+                    )
                 for chunk in iter(lambda: response.read(1024 * 1024), b""):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise ValueError("download cancelled")
                     handle.write(chunk)
                     digest.update(chunk)
                     size_bytes += len(chunk)
+                    if progress is not None:
+                        progress.update(
+                            {
+                                "downloaded_bytes": size_bytes,
+                                "percent": round((size_bytes / total_bytes) * 100, 1) if total_bytes else 0,
+                            }
+                        )
             sha256 = digest.hexdigest()
             expected_sha256 = civitai_expected_sha256(selected_file)
             if expected_sha256 and sha256.lower() != expected_sha256:
@@ -1177,6 +1205,88 @@ def download_civitai_asset(payload: dict[str, Any]) -> dict[str, Any]:
         "file": {"name": file_name, "size_bytes": size_bytes, "sha256": item.get("sha256") if item else ""},
         "warnings": ["Downloaded file is registered as needs_review. Review license and compatibility before use."],
     }
+
+
+def public_civitai_download_job(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in job.items()
+        if key not in {"cancel_event", "payload"}
+    }
+
+
+def get_civitai_download_job(job_id: str) -> dict[str, Any]:
+    with CIVITAI_DOWNLOAD_JOBS_LOCK:
+        job = CIVITAI_DOWNLOAD_JOBS.get(job_id)
+        if not job:
+            raise ValueError("download job not found")
+        return {"ok": True, "job": public_civitai_download_job(dict(job))}
+
+
+def create_civitai_download_job(payload: dict[str, Any]) -> dict[str, Any]:
+    if str(payload.get("confirm_text") or "").strip() != "DOWNLOAD":
+        raise ValueError("confirm_text must be DOWNLOAD")
+    job_id = new_id("cdj")
+    cancel_event = threading.Event()
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "file_name": "",
+        "location_id": str(payload.get("location_id") or ""),
+        "downloaded_bytes": 0,
+        "total_bytes": 0,
+        "percent": 0,
+        "error": "",
+        "result": None,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "cancel_event": cancel_event,
+        "payload": payload,
+    }
+    with CIVITAI_DOWNLOAD_JOBS_LOCK:
+        CIVITAI_DOWNLOAD_JOBS[job_id] = job
+
+    def worker() -> None:
+        try:
+            with CIVITAI_DOWNLOAD_JOBS_LOCK:
+                CIVITAI_DOWNLOAD_JOBS[job_id]["status"] = "running"
+                CIVITAI_DOWNLOAD_JOBS[job_id]["updated_at"] = now_iso()
+            result = download_civitai_asset(payload, cancel_event=cancel_event, progress=job)
+            with CIVITAI_DOWNLOAD_JOBS_LOCK:
+                CIVITAI_DOWNLOAD_JOBS[job_id].update(
+                    {
+                        "status": "completed",
+                        "percent": 100,
+                        "result": result,
+                        "updated_at": now_iso(),
+                    }
+                )
+        except Exception as exc:
+            with CIVITAI_DOWNLOAD_JOBS_LOCK:
+                status = "cancelled" if cancel_event.is_set() or str(exc) == "download cancelled" else "failed"
+                CIVITAI_DOWNLOAD_JOBS[job_id].update(
+                    {
+                        "status": status,
+                        "error": str(exc),
+                        "updated_at": now_iso(),
+                    }
+                )
+
+    threading.Thread(target=worker, daemon=True).start()
+    return get_civitai_download_job(job_id)
+
+
+def cancel_civitai_download_job(job_id: str) -> dict[str, Any]:
+    with CIVITAI_DOWNLOAD_JOBS_LOCK:
+        job = CIVITAI_DOWNLOAD_JOBS.get(job_id)
+        if not job:
+            raise ValueError("download job not found")
+        if job.get("status") in {"completed", "failed", "cancelled"}:
+            return {"ok": True, "job": public_civitai_download_job(dict(job))}
+        job["cancel_event"].set()
+        job["status"] = "cancelling"
+        job["updated_at"] = now_iso()
+        return {"ok": True, "job": public_civitai_download_job(dict(job))}
 
 
 def workflow_requirement_kind(class_type: str, input_key: str) -> str | None:
@@ -2713,6 +2823,13 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/api/asset-registry/workflow-requirements":
             self.send_json(list_workflow_asset_requirements())
             return
+        if self.path.startswith("/api/civitai/download-jobs/"):
+            job_id = self.path.split("/")[4]
+            try:
+                self.send_json(get_civitai_download_job(job_id))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 404)
+            return
         if self.path == "/api/comparisons" or self.path.startswith("/api/comparisons?"):
             self.send_json(list_comparisons(parse_query_params(self.path)))
             return
@@ -2820,6 +2937,13 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if self.path == "/api/civitai/download":
                 self.send_json(download_civitai_asset(self.read_body()))
+                return
+            if self.path == "/api/civitai/download-jobs":
+                self.send_json(create_civitai_download_job(self.read_body()))
+                return
+            if self.path.startswith("/api/civitai/download-jobs/") and self.path.endswith("/cancel"):
+                job_id = self.path.split("/")[4]
+                self.send_json(cancel_civitai_download_job(job_id))
                 return
             if self.path == "/api/civitai/config":
                 self.send_json(save_civitai_config(self.read_body()))

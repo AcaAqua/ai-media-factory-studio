@@ -323,6 +323,22 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   display: grid;
   gap: 10px;
 }
+.download-progress {
+  display: grid;
+  gap: 6px;
+}
+.download-progress progress {
+  width: 100%;
+  height: 10px;
+}
+.progress-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
 .asset-registry-summary {
   margin: 10px 0;
 }

@@ -19,6 +19,7 @@ let databaseBackups = [];
 let activeAssetRegistryItem = null;
 let lastCivitaiLookup = null;
 let lastDownloadedAssetId = "";
+let activeCivitaiDownloadJobId = "";
 
 const FIELD_LABELS = {
   positive_prompt: "Positive Prompt",
@@ -1111,6 +1112,8 @@ async function planCivitaiDownload() {
           <input id="civitaiDownloadConfirmText" type="text" placeholder="DOWNLOAD" autocomplete="off">
         </label>
         <button class="primary" type="button" id="downloadCivitaiAsset" ${result.download_enabled ? "" : "disabled"}>確認してダウンロード</button>
+        <button class="secondary" type="button" id="cancelCivitaiDownload" disabled>キャンセル</button>
+        <div id="civitaiDownloadProgress" class="download-progress"></div>
         <p class="note">既存ファイルは上書きしません。CivitaiのSHA256がある場合は検証し、成功後に資産台帳へneeds_reviewで登録します。</p>
       ` : ""}
       ${(result.locations || []).length ? `
@@ -1154,15 +1157,23 @@ async function downloadCivitaiAsset() {
   const confirmed = confirm("Civitaiから選択ファイルをダウンロードし、成功後に資産台帳へneeds_reviewで登録します。既存ファイルは上書きしません。実行しますか？");
   if (!confirmed) return;
   const button = $("#downloadCivitaiAsset");
+  const cancelButton = $("#cancelCivitaiDownload");
+  const progressPanel = $("#civitaiDownloadProgress");
   if (button) {
     button.disabled = true;
-    button.textContent = "ダウンロード中...";
+    button.textContent = "開始中...";
   }
+  if (cancelButton) cancelButton.disabled = false;
+  if (progressPanel) progressPanel.innerHTML = `<span class="chip">queued</span>`;
   try {
-    const result = await api("/api/civitai/download", {
+    const started = await api("/api/civitai/download-jobs", {
       method: "POST",
       body: JSON.stringify({ civitai: lastCivitaiLookup, location_id: locationId, confirm_text: confirmText }),
     });
+    activeCivitaiDownloadJobId = started.job?.job_id || "";
+    if (!activeCivitaiDownloadJobId) throw new Error("download job was not created");
+    if (button) button.textContent = "ダウンロード中...";
+    const result = await pollCivitaiDownloadJob(activeCivitaiDownloadJobId);
     const item = result.item;
     if (item) {
       lastDownloadedAssetId = item.item_id;
@@ -1196,11 +1207,48 @@ async function downloadCivitaiAsset() {
     if (item?.item_id) openAssetRegistryItem(item.item_id);
     alert(`ダウンロードして資産台帳へ登録しました: ${result.file?.name || item?.file_name || "file"}`);
   } finally {
+    activeCivitaiDownloadJobId = "";
     if (button) {
       button.disabled = false;
       button.textContent = "確認してダウンロード";
     }
+    if (cancelButton) cancelButton.disabled = true;
   }
+}
+
+function renderCivitaiDownloadProgress(job) {
+  const progressPanel = $("#civitaiDownloadProgress");
+  if (!progressPanel || !job) return;
+  const downloaded = formatBytes(job.downloaded_bytes || 0);
+  const total = job.total_bytes ? formatBytes(job.total_bytes) : "size不明";
+  const percent = job.percent ? `${job.percent}%` : "計測中";
+  progressPanel.innerHTML = `
+    <div class="progress-row">
+      <span class="chip ${job.status === "failed" ? "warn" : "ok"}">${escapeHtml(job.status || "running")}</span>
+      <span>${escapeHtml(`${downloaded} / ${total} / ${percent}`)}</span>
+    </div>
+    <progress max="100" value="${escapeHtml(job.percent || 0)}"></progress>
+    ${job.error ? `<p class="warning-text">${escapeHtml(job.error)}</p>` : ""}
+  `;
+}
+
+async function pollCivitaiDownloadJob(jobId) {
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const payload = await api(`/api/civitai/download-jobs/${encodeURIComponent(jobId)}`);
+    const job = payload.job;
+    renderCivitaiDownloadProgress(job);
+    if (job.status === "completed") return job.result;
+    if (job.status === "failed" || job.status === "cancelled") {
+      throw new Error(job.error || `download ${job.status}`);
+    }
+  }
+}
+
+async function cancelCivitaiDownload() {
+  if (!activeCivitaiDownloadJobId) return;
+  await api(`/api/civitai/download-jobs/${encodeURIComponent(activeCivitaiDownloadJobId)}/cancel`, { method: "POST", body: "{}" });
+  renderCivitaiDownloadProgress({ status: "cancelling", downloaded_bytes: 0, total_bytes: 0, percent: 0 });
 }
 
 async function applyCivitaiToAsset() {
@@ -2239,6 +2287,8 @@ document.addEventListener("click", (event) => {
   if (planCivitaiButton) planCivitaiDownload().catch((error) => alert(error.message));
   const downloadCivitaiButton = event.target.closest("#downloadCivitaiAsset");
   if (downloadCivitaiButton) downloadCivitaiAsset().catch((error) => alert(error.message));
+  const cancelCivitaiButton = event.target.closest("#cancelCivitaiDownload");
+  if (cancelCivitaiButton) cancelCivitaiDownload().catch((error) => alert(error.message));
   const openRestoreButton = event.target.closest("#openDatabaseRestoreDialog");
   if (openRestoreButton) openDatabaseRestoreDialog().catch((error) => alert(error.message));
   const setupActionButton = event.target.closest("[data-setup-action]");
