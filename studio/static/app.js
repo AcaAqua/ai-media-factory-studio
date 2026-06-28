@@ -801,16 +801,20 @@ function sendMissingAssetToCivitaiSearch(assetName, assetKind = "") {
   $("#workflowAssetWarningDialog")?.close();
   switchView("models");
   const input = $("#civitaiUrl");
+  const searchInput = $("#civitaiSearchQuery");
+  const searchType = $("#civitaiSearchType");
   const hint = $("#civitaiLookupHint");
   const query = [name, assetKindLabel(kind)].filter(Boolean).join(" ");
+  if (searchInput) searchInput.value = name;
+  if (searchType) searchType.value = civitaiTypeFromAssetKind(kind);
   if (input) {
     input.value = "";
     input.placeholder = `Civitai URLを貼付: ${query}`;
-    input.focus();
+    (searchInput || input).focus();
   }
   if (hint) {
     const encoded = encodeURIComponent(query);
-    hint.innerHTML = `不足資産: <strong>${escapeHtml(query)}</strong>。Civitaiで該当モデル/LoRAを開き、URLを貼り付けてください。 <a href="https://civitai.com/search/models?sortBy=models_v9&query=${encoded}" target="_blank" rel="noreferrer">Civitai検索を開く</a>`;
+    hint.innerHTML = `不足資産: <strong>${escapeHtml(query)}</strong>。Studio内検索またはCivitaiページで該当モデル/LoRAを開き、候補からメタデータ確認へ進んでください。 <a href="https://civitai.com/search/models?sortBy=models_v9&query=${encoded}" target="_blank" rel="noreferrer">Civitai検索を開く</a>`;
   }
 }
 
@@ -1204,6 +1208,53 @@ async function testCivitaiKey() {
   const result = await api("/api/civitai/lookup", { method: "POST", body: JSON.stringify({ url: "https://civitai.com/models/257749" }) });
   const modelName = result.civitai?.model?.name || "metadata";
   alert(`Civitai接続OK: ${modelName}`);
+}
+
+function civitaiTypeFromAssetKind(kind) {
+  return {
+    checkpoint: "Checkpoint",
+    lora: "LORA",
+    vae: "VAE",
+    controlnet: "Controlnet",
+  }[kind] || "";
+}
+
+async function searchCivitai(event) {
+  event.preventDefault();
+  const resultsPanel = $("#civitaiSearchResults");
+  const query = $("#civitaiSearchQuery").value.trim();
+  const type = $("#civitaiSearchType").value;
+  if (!query) {
+    resultsPanel.innerHTML = `<div class="empty-state">検索語を入力してください。</div>`;
+    return;
+  }
+  resultsPanel.innerHTML = `<div class="empty-state">Civitaiを検索しています...</div>`;
+  const result = await api("/api/civitai/search", { method: "POST", body: JSON.stringify({ query, type }) });
+  const items = result.results || [];
+  resultsPanel.innerHTML = items.length ? `
+    ${result.fallback_used ? `<p class="note">通常検索で候補が少なかったため、tag検索結果を表示しています。</p>` : ""}
+    <div class="asset-registry-grid">
+      ${items.map((item) => `
+        <article class="civitai-card">
+          <header>
+            <strong>${escapeHtml(item.name || "名称未取得")}</strong>
+            <span class="chip ${item.nsfw ? "warn" : "ok"}">${escapeHtml(item.type || "type不明")}</span>
+          </header>
+          <p>${escapeHtml([item.creator, item.version_name, item.base_model].filter(Boolean).join(" / ") || "-")}</p>
+          <p>${escapeHtml((item.trained_words || []).slice(0, 8).join(", ") || "trigger wordsなし")}</p>
+          <div class="action-row">
+            <button type="button" data-civitai-result-url="${escapeHtml(item.source_url)}">メタデータ確認</button>
+            <a class="secondary text-link" href="${escapeHtml(item.source_url)}" target="_blank" rel="noreferrer">Civitaiを開く</a>
+          </div>
+        </article>
+      `).join("")}
+    </div>
+  ` : `<div class="empty-state">候補が見つかりませんでした。検索語を変えてください。</div>`;
+}
+
+async function lookupCivitaiUrl(url) {
+  $("#civitaiUrl").value = url;
+  await lookupCivitai({ preventDefault() {} });
 }
 
 async function lookupCivitai(event) {
@@ -2504,6 +2555,8 @@ document.addEventListener("click", (event) => {
   if (clearWorkflowAssetButton) clearWorkflowRequirementAsset(clearWorkflowAssetButton.dataset.clearWorkflowAsset).catch((error) => alert(error.message));
   const civitaiMissingAssetButton = event.target.closest("[data-civitai-missing-asset]");
   if (civitaiMissingAssetButton) sendMissingAssetToCivitaiSearch(civitaiMissingAssetButton.dataset.civitaiMissingAsset, civitaiMissingAssetButton.dataset.civitaiMissingKind);
+  const civitaiResultButton = event.target.closest("[data-civitai-result-url]");
+  if (civitaiResultButton) lookupCivitaiUrl(civitaiResultButton.dataset.civitaiResultUrl).catch((error) => alert(error.message));
   const openRestoreButton = event.target.closest("#openDatabaseRestoreDialog");
   if (openRestoreButton) openDatabaseRestoreDialog().catch((error) => alert(error.message));
   const setupActionButton = event.target.closest("[data-setup-action]");
@@ -2521,6 +2574,9 @@ $("#generateForm").addEventListener("submit", (event) => submitGeneration(event)
 $("#civitaiKeyForm").addEventListener("submit", (event) => saveCivitaiKey(event).catch((error) => alert(error.message)));
 $("#testCivitaiKey").addEventListener("click", () => testCivitaiKey().catch((error) => alert(error.message)));
 $("#deleteCivitaiKey").addEventListener("click", () => deleteCivitaiKey().catch((error) => alert(error.message)));
+$("#civitaiSearchForm").addEventListener("submit", (event) => searchCivitai(event).catch((error) => {
+  $("#civitaiSearchResults").innerHTML = `<div class="empty-state">検索できませんでした: ${escapeHtml(error.message)}</div>`;
+}));
 $("#civitaiLookupForm").addEventListener("submit", (event) => lookupCivitai(event).catch((error) => {
   $("#civitaiPreview").innerHTML = `<div class="empty-state">取得できませんでした: ${escapeHtml(error.message)}</div>`;
 }));

@@ -2116,6 +2116,51 @@ def lookup_civitai_model(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "civitai": summarize_civitai_model(model, version, source_url)}
 
 
+def search_civitai_models(payload: dict[str, Any]) -> dict[str, Any]:
+    from urllib.parse import urlencode
+
+    query = str(payload.get("query") or "").strip()
+    model_type = str(payload.get("type") or "").strip()
+    if not query:
+        raise ValueError("query is required")
+    params = {"query": query, "limit": "12"}
+    if model_type:
+        params["types"] = model_type
+    ok, data = civitai_request(f"/models?{urlencode(params)}")
+    if not ok:
+        raise ValueError(f"Civitai search failed: {data}")
+    items = data.get("items") if isinstance(data, dict) else []
+    fallback_used = False
+    if not items:
+        fallback_params = {"tag": query, "limit": "12"}
+        if model_type:
+            fallback_params["types"] = model_type
+        ok, data = civitai_request(f"/models?{urlencode(fallback_params)}")
+        if ok:
+            items = data.get("items") if isinstance(data, dict) else []
+            fallback_used = True
+    results = []
+    for model in items if isinstance(items, list) else []:
+        versions = model.get("modelVersions") if isinstance(model.get("modelVersions"), list) else []
+        version = versions[0] if versions else {}
+        results.append(
+            {
+                "model_id": model.get("id"),
+                "name": model.get("name"),
+                "type": model.get("type"),
+                "nsfw": model.get("nsfw"),
+                "creator": (model.get("creator") or {}).get("username") if isinstance(model.get("creator"), dict) else None,
+                "tags": model.get("tags") or [],
+                "version_id": version.get("id") if isinstance(version, dict) else None,
+                "version_name": version.get("name") if isinstance(version, dict) else None,
+                "base_model": version.get("baseModel") if isinstance(version, dict) else None,
+                "trained_words": version.get("trainedWords") if isinstance(version, dict) else [],
+                "source_url": f"https://civitai.com/models/{model.get('id')}" + (f"?modelVersionId={version.get('id')}" if isinstance(version, dict) and version.get("id") else ""),
+            }
+        )
+    return {"ok": True, "query": query, "fallback_used": fallback_used, "results": results}
+
+
 def post_json(url: str, payload: dict[str, Any], timeout: float = 5.0) -> tuple[bool, Any]:
     data = json.dumps(payload).encode("utf-8")
     req = Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
@@ -3034,6 +3079,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if self.path == "/api/civitai/lookup":
                 self.send_json(lookup_civitai_model(self.read_body()))
+                return
+            if self.path == "/api/civitai/search":
+                self.send_json(search_civitai_models(self.read_body()))
                 return
             if self.path == "/api/civitai/download-plan":
                 self.send_json(civitai_download_plan(self.read_body()))

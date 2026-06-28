@@ -244,6 +244,25 @@
                 <button class="danger" type="button" id="deleteCivitaiKey">キー削除</button>
               </div>
             </div>
+            <form class="inline-form" id="civitaiSearchForm">
+              <label class="field">
+                <span>Civitai検索</span>
+                <input id="civitaiSearchQuery" placeholder="不足資産名 / LoRA名 / Checkpoint名">
+              </label>
+              <label class="field compact">
+                <span>種別</span>
+                <select id="civitaiSearchType">
+                  <option value="">すべて</option>
+                  <option value="Checkpoint">Checkpoint</option>
+                  <option value="LORA">LoRA</option>
+                  <option value="TextualInversion">Textual Inversion</option>
+                  <option value="Controlnet">ControlNet</option>
+                  <option value="VAE">VAE</option>
+                </select>
+              </label>
+              <button type="submit">検索</button>
+            </form>
+            <div id="civitaiSearchResults" class="civitai-preview"></div>
             <form class="inline-form" id="civitaiLookupForm">
               <label class="field">
                 <span>Civitai URL</span>

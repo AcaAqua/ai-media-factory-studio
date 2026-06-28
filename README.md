@@ -133,6 +133,8 @@ If required assets are missing or the selected Workflow has not been scanned yet
 
 Missing Workflow assets can be sent to the Civitai lookup area as search guidance, so users can find the asset page, paste its URL, and proceed through the safe download flow.
 
+Studio can also search Civitai models from the Models view, show candidate cards, and pass a selected candidate into the existing metadata lookup and safe download planning flow.
+
 Users are still responsible for reviewing license terms, model safety, and local placement before using third-party assets.
 
 ## Roadmap
