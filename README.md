@@ -121,6 +121,8 @@ Downloads run as local background jobs with progress polling and a cancel action
 
 After a successful download, Studio refreshes the asset registry, highlights the newly registered asset, opens its detail review dialog, and resyncs Workflow required asset matches.
 
+When automatic matching is not enough, Workflow required assets can be manually linked to a registered asset of the same kind from the asset registry panel.
+
 Users are still responsible for reviewing license terms, model safety, and local placement before using third-party assets.
 
 ## Roadmap

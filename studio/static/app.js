@@ -854,8 +854,35 @@ function renderWorkflowRequirements() {
           <p>${escapeHtml(item.workflow_name)} / node ${escapeHtml(item.node_id)} / ${escapeHtml(item.class_type)}</p>
           <p>${escapeHtml(assetKindLabel(item.asset_kind))} / ${escapeHtml(item.input_key)}</p>
           <p>${escapeHtml(item.matched_relative_path || "台帳一致なし")}</p>
+          ${renderWorkflowRequirementPicker(item)}
         </article>
       `).join("") || `<div class="empty-state">まだWorkflow要求資産を検出していません。</div>`}
+    </div>
+  `;
+}
+
+function renderWorkflowRequirementPicker(requirement) {
+  const candidates = (assetRegistry.items || [])
+    .filter((item) => !item.missing && item.asset_kind === requirement.asset_kind)
+    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  if (!candidates.length) {
+    return `<p class="note">同種の登録資産がありません。Civitai取得または保存先スキャンを行ってください。</p>`;
+  }
+  const selectId = `workflowAssetSelect-${requirement.requirement_id}`;
+  return `
+    <label class="field compact-field">
+      <span>台帳資産を選択</span>
+      <select id="${escapeHtml(selectId)}">
+        ${candidates.map((asset) => `
+          <option value="${escapeHtml(asset.item_id)}" ${asset.item_id === requirement.matched_item_id ? "selected" : ""}>
+            ${escapeHtml(`${asset.name} / ${asset.relative_path}`)}
+          </option>
+        `).join("")}
+      </select>
+    </label>
+    <div class="action-row">
+      <button type="button" data-link-workflow-asset="${escapeHtml(requirement.requirement_id)}">この資産を使う</button>
+      ${requirement.matched_item_id ? `<button class="secondary" type="button" data-clear-workflow-asset="${escapeHtml(requirement.requirement_id)}">解除</button>` : ""}
     </div>
   `;
 }
@@ -871,6 +898,32 @@ async function scanWorkflowRequirements() {
   } finally {
     $("#scanWorkflowRequirements").disabled = false;
   }
+}
+
+async function linkWorkflowRequirementAsset(requirementId) {
+  const select = $(`#workflowAssetSelect-${CSS.escape(requirementId)}`);
+  const itemId = select?.value;
+  if (!itemId) {
+    alert("紐付ける資産を選択してください。");
+    return;
+  }
+  const result = await api(`/api/asset-registry/workflow-requirements/${encodeURIComponent(requirementId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ item_id: itemId }),
+  });
+  assetRegistry.requirements = result.requirements || [];
+  assetRegistry.requirement_counts = result.counts || [];
+  renderWorkflowRequirements();
+}
+
+async function clearWorkflowRequirementAsset(requirementId) {
+  const result = await api(`/api/asset-registry/workflow-requirements/${encodeURIComponent(requirementId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ clear: true }),
+  });
+  assetRegistry.requirements = result.requirements || [];
+  assetRegistry.requirement_counts = result.counts || [];
+  renderWorkflowRequirements();
 }
 
 async function refreshAssetRegistry() {
@@ -2289,6 +2342,10 @@ document.addEventListener("click", (event) => {
   if (downloadCivitaiButton) downloadCivitaiAsset().catch((error) => alert(error.message));
   const cancelCivitaiButton = event.target.closest("#cancelCivitaiDownload");
   if (cancelCivitaiButton) cancelCivitaiDownload().catch((error) => alert(error.message));
+  const linkWorkflowAssetButton = event.target.closest("[data-link-workflow-asset]");
+  if (linkWorkflowAssetButton) linkWorkflowRequirementAsset(linkWorkflowAssetButton.dataset.linkWorkflowAsset).catch((error) => alert(error.message));
+  const clearWorkflowAssetButton = event.target.closest("[data-clear-workflow-asset]");
+  if (clearWorkflowAssetButton) clearWorkflowRequirementAsset(clearWorkflowAssetButton.dataset.clearWorkflowAsset).catch((error) => alert(error.message));
   const openRestoreButton = event.target.closest("#openDatabaseRestoreDialog");
   if (openRestoreButton) openDatabaseRestoreDialog().catch((error) => alert(error.message));
   const setupActionButton = event.target.closest("[data-setup-action]");

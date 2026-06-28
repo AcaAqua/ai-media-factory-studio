@@ -1462,6 +1462,43 @@ def list_workflow_asset_requirements() -> dict[str, Any]:
     return {"ok": True, "requirements": requirements, "counts": counts}
 
 
+def update_workflow_asset_requirement(requirement_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    item_id = str(payload.get("item_id") or "").strip()
+    clear = bool(payload.get("clear"))
+    if not requirement_id:
+        raise ValueError("requirement_id is required")
+    with db() as con:
+        requirement = row(con, "SELECT * FROM workflow_asset_requirements WHERE requirement_id = ?", (requirement_id,))
+        if not requirement:
+            raise ValueError("workflow asset requirement not found")
+        if clear:
+            con.execute(
+                """
+                UPDATE workflow_asset_requirements
+                SET matched_item_id = NULL, status = 'missing', updated_at = datetime('now')
+                WHERE requirement_id = ?
+                """,
+                (requirement_id,),
+            )
+        else:
+            if not item_id:
+                raise ValueError("item_id is required")
+            item = row(con, "SELECT * FROM asset_registry_items WHERE item_id = ? AND missing = 0", (item_id,))
+            if not item:
+                raise ValueError("asset registry item not found")
+            if item["asset_kind"] != requirement["asset_kind"]:
+                raise ValueError(f"asset kind does not match: {item['asset_kind']} != {requirement['asset_kind']}")
+            con.execute(
+                """
+                UPDATE workflow_asset_requirements
+                SET matched_item_id = ?, status = 'matched', last_checked_at = datetime('now'), updated_at = datetime('now')
+                WHERE requirement_id = ?
+                """,
+                (item_id, requirement_id),
+            )
+    return list_workflow_asset_requirements()
+
+
 def scan_asset_registry_location(con: sqlite3.Connection, location: dict[str, Any]) -> dict[str, Any]:
     location_id = location["location_id"]
     asset_kind = location["asset_kind"]
@@ -3035,6 +3072,13 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         try:
+            if self.path.startswith("/api/asset-registry/workflow-requirements/"):
+                requirement_id = self.path.split("/")[4]
+                try:
+                    self.send_json(update_workflow_asset_requirement(requirement_id, self.read_body()))
+                except ValueError as exc:
+                    self.send_json({"error": str(exc)}, 404)
+                return
             if self.path.startswith("/api/asset-registry/items/"):
                 item_id = self.path.split("/")[4]
                 self.send_json(update_asset_registry_item(item_id, self.read_body()))

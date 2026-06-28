@@ -626,6 +626,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
   font-size: 12px;
   margin-bottom: 6px;
 }
+.compact-field {
+  gap: 4px;
+}
+.compact-field select {
+  min-width: 0;
+}
 .chip-list {
   display: flex;
   flex-wrap: wrap;
