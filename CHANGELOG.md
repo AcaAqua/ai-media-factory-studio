@@ -11,6 +11,7 @@
 - Added background Civitai download jobs with progress polling and cancellation.
 - Added manual Workflow required asset linking from registered asset registry items.
 - Preserved existing valid Workflow asset links during required asset rescans.
+- Applied matched Workflow asset links to the copied ComfyUI execution payload during generation.
 - Improved `scripts/start_studio.ps1` to reuse an already running Studio server or start it in the background and open the browser.
 
 ## v0.1.9 - 2026-06-27

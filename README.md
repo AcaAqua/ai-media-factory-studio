@@ -125,6 +125,8 @@ When automatic matching is not enough, Workflow required assets can be manually 
 
 Valid existing Workflow asset links are preserved during required asset rescans, so manual choices are not replaced by filename-based matching unless the linked asset is missing or incompatible.
 
+During generation, matched Workflow asset links are applied only to the copied ComfyUI execution payload. The original Workflow JSON file is not modified.
+
 Users are still responsible for reviewing license terms, model safety, and local placement before using third-party assets.
 
 ## Roadmap

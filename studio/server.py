@@ -1869,6 +1869,52 @@ def apply_mappings(
     return prepared, applied
 
 
+def apply_workflow_asset_links(
+    con: sqlite3.Connection,
+    workflow_relative_path: str,
+    prepared: dict[str, Any],
+) -> list[dict[str, Any]]:
+    links = rows(
+        con,
+        """
+        SELECT r.requirement_id, r.node_id, r.input_key, r.asset_kind, r.asset_name,
+               i.item_id, i.relative_path, i.file_name
+        FROM workflow_asset_requirements r
+        JOIN asset_registry_items i ON i.item_id = r.matched_item_id
+        WHERE r.workflow_path = ?
+          AND r.status = 'matched'
+          AND i.missing = 0
+          AND i.asset_kind = r.asset_kind
+        ORDER BY r.workflow_name, r.node_id, r.input_key
+        """,
+        (workflow_relative_path,),
+    )
+    applied: list[dict[str, Any]] = []
+    for link in links:
+        node_id = str(link["node_id"])
+        input_key = str(link["input_key"])
+        if node_id not in prepared or not isinstance(prepared[node_id].get("inputs"), dict):
+            continue
+        if input_key not in prepared[node_id]["inputs"]:
+            continue
+        value = link.get("relative_path") or link.get("file_name")
+        if not value:
+            continue
+        prepared[node_id]["inputs"][input_key] = value
+        applied.append(
+            {
+                "requirement_id": link["requirement_id"],
+                "node_id": node_id,
+                "input_key": input_key,
+                "asset_kind": link["asset_kind"],
+                "asset_name": link["asset_name"],
+                "item_id": link["item_id"],
+                "value": value,
+            }
+        )
+    return applied
+
+
 def missing_required_mappings(mappings: list[dict[str, Any]], negative: str = "") -> list[str]:
     enabled = {mapping["field_key"] for mapping in mappings if mapping.get("is_enabled", 1)}
     required = set(REQUIRED_MAPPINGS)
@@ -3370,6 +3416,8 @@ def create_generation_job(payload: dict[str, Any]) -> dict[str, Any]:
                 endpoint = get_setting(con, "comfy_endpoint", DEFAULT_COMFY)
                 workflow_json = read_workflow_json(workflow["relative_path"])
                 prepared_workflow, applied = apply_mappings(workflow_json, mappings, prompt, negative, parameters)
+                applied_asset_links = apply_workflow_asset_links(con, workflow["relative_path"], prepared_workflow)
+                parameters["applied_asset_links"] = applied_asset_links
                 prepared_payload = {"prompt": prepared_workflow, "client_id": CLIENT_ID}
                 ok, response = post_json(f"{endpoint}/prompt", prepared_payload)
                 if ok:
@@ -3440,6 +3488,7 @@ def create_generation_job(payload: dict[str, Any]) -> dict[str, Any]:
         "content_scope": content_scope,
         "resolved_output_prefix": output_prefix,
         "output_scope_validation_status": output_scope_validation_status,
+        "asset_links_applied": len(parameters.get("applied_asset_links") or []),
     }
 
 

@@ -1912,7 +1912,8 @@ async function submitGeneration(event) {
   payload.cfg = Number(payload.cfg);
   const result = await api("/api/generate", { method: "POST", body: JSON.stringify(payload) });
   await load();
-  alert(result.status === "submitted" ? "ComfyUIへ送信しました。" : `送信せず保存しました: ${result.error || result.status}`);
+  const assetLinkNote = result.asset_links_applied ? ` / 資産リンク ${result.asset_links_applied}件反映` : "";
+  alert(result.status === "submitted" ? `ComfyUIへ送信しました${assetLinkNote}。` : `送信せず保存しました: ${result.error || result.status}${assetLinkNote}`);
 }
 
 async function ensureWorkflowRegistered() {
