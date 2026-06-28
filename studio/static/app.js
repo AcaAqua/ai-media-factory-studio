@@ -710,6 +710,26 @@ function renderAssetLinkPreview() {
   `;
 }
 
+function confirmWorkflowAssetReadiness() {
+  const selected = $("#workflowSelect")?.value || "";
+  if (!selected) return true;
+  if (selected.startsWith("discover:")) {
+    return confirm("未登録Workflowです。生成時に登録されますが、Workflow必要資産チェックはまだ反映されません。このまま送信しますか？");
+  }
+  const requirements = selectedWorkflowAssetRequirements();
+  if (!requirements.length) {
+    return confirm("このWorkflowの必要資産は未検出です。モデル画面で不足検知を実行してから送信することを推奨します。このまま送信しますか？");
+  }
+  const missing = requirements.filter((item) => item.status === "missing");
+  if (!missing.length) return true;
+  const preview = missing
+    .slice(0, 8)
+    .map((item) => `- ${assetKindLabel(item.asset_kind)}: ${item.asset_name}`)
+    .join("\n");
+  const suffix = missing.length > 8 ? `\n...ほか ${missing.length - 8}件` : "";
+  return confirm(`このWorkflowには不足資産があります。\n${preview}${suffix}\n\nこのまま送信するとComfyUI側で失敗する可能性があります。続行しますか？`);
+}
+
 function renderModels() {
   const list = $("#modelList");
   const models = state.connections.ollama.models || [];
@@ -1950,6 +1970,7 @@ function updateScopeWarning() {
 
 async function submitGeneration(event) {
   event.preventDefault();
+  if (!confirmWorkflowAssetReadiness()) return;
   const form = new FormData(event.currentTarget);
   const workflowId = await ensureWorkflowRegistered();
   const payload = Object.fromEntries(form.entries());
